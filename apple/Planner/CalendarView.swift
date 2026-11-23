@@ -50,7 +50,7 @@ struct CalendarView: View {
                 proposed: model.proposal?.blocks ?? [],
                 scrollToHour: scrollHour,
                 onTapProposed: { selectedProposal = $0 },
-                onTapEvent: { if $0.isTaskBlock { selectedBlock = $0 } }
+                onTapEvent: { if $0.source == .local { selectedBlock = $0 } }
             )
         }
         .navigationTitle(title)
@@ -93,7 +93,7 @@ struct CalendarView: View {
             titleVisibility: .visible,
             presenting: selectedBlock
         ) { block in
-            Button("Remove Block", role: .destructive) { Task { await model.removeBlock(block) } }
+            Button(block.isTaskBlock ? "Remove Block" : "Delete Event", role: .destructive) { Task { await model.removeBlock(block) } }
         } message: { _ in
             Text("To move it, drag it in Apple Calendar's Planner calendar.")
         }

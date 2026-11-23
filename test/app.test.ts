@@ -324,24 +324,48 @@ describe('device sync (iOS and macOS apps)', () => {
     expect(r.body.blocks[0]).toMatchObject({ taskId: task.id, title: 'Write report' });
   });
 
-  it('applies blocks the user moved or deleted in Apple Calendar', async () => {
+  it('returns events created in Planner, not only task blocks, for the Planner calendar', async () => {
+    const planner = await startWithDevice();
+    const task = planner.createTask({ title: 'Deep work', estimateMin: 60 });
+    const block = await planner.createEvent({ title: 'Deep work', startAt: inDays(1, 9), endAt: inDays(1, 10), taskId: task.id });
+    const { event: dentist } = await planner.capture('Dentist tomorrow 3pm');
+    await sync({ events: [{ externalId: 'ek-1', title: 'From the phone', startAt: inDays(2, 9), endAt: inDays(2, 10) }] });
+
+    const r = await sync({ events: [{ externalId: 'ek-1', title: 'From the phone', startAt: inDays(2, 9), endAt: inDays(2, 10) }] });
+    expect(r.body.blocks.map((e: any) => e.id).sort()).toEqual([block.id, dentist!.id].sort());
+    expect(r.body.blocks.find((e: any) => e.id === dentist!.id)).toMatchObject({ title: 'Dentist', taskId: null, source: 'local' });
+  });
+
+  it('applies Planner events the user moved or deleted in Apple Calendar', async () => {
     const planner = await startWithDevice();
     const task = planner.createTask({ title: 'Deep work', estimateMin: 120 });
     const a = await planner.createEvent({ title: 'Deep work', startAt: inDays(1, 9), endAt: inDays(1, 10), taskId: task.id });
     const b = await planner.createEvent({ title: 'Deep work', startAt: inDays(2, 9), endAt: inDays(2, 10), taskId: task.id });
-    const plain = await planner.createEvent({ title: 'Lunch', startAt: inDays(1, 12), endAt: inDays(1, 13) });
+    const lunch = await planner.createEvent({ title: 'Lunch', startAt: inDays(1, 12), endAt: inDays(1, 13) });
+    const call = await planner.createEvent({ title: 'Call Sam', startAt: inDays(3, 12), endAt: inDays(3, 13) });
+    await sync({ events: [{ externalId: 'ek-1', title: 'Phone event', startAt: inDays(4, 9), endAt: inDays(4, 10) }] });
+    const mirrored = planner.listEvents().find((e) => e.source === 'device')!;
 
     const r = await sync({
+      events: [{ externalId: 'ek-1', title: 'Phone event', startAt: inDays(4, 9), endAt: inDays(4, 10) }],
       blockChanges: [
         { id: a.id, startAt: inDays(1, 14), endAt: inDays(1, 15) },
         { id: b.id, deleted: true },
-        { id: plain.id, deleted: true },
+        { id: lunch.id, deleted: true },
+        { id: call.id, startAt: inDays(3, 16), endAt: inDays(3, 17) },
+        { id: mirrored.id, deleted: true },
         { id: 'gone', deleted: true },
       ],
     });
-    expect(r.body.blocks.map((e: any) => [e.id, e.startAt])).toEqual([[a.id, inDays(1, 14)]]);
-    expect(r.body.rejected).toEqual([{ id: plain.id, reason: 'Not a task block.' }]);
-    expect(planner.listEvents().find((e) => e.id === plain.id)).toBeTruthy();
+    expect(r.body.blocks.map((e: any) => [e.id, e.startAt]).sort()).toEqual(
+      [
+        [a.id, inDays(1, 14)],
+        [call.id, inDays(3, 16)],
+      ].sort(),
+    );
+    expect(r.body.rejected).toEqual([{ id: mirrored.id, reason: 'Not an event created in Planner.' }]);
+    expect(planner.listEvents().find((e) => e.id === lunch.id)).toBeUndefined();
+    expect(planner.listEvents().find((e) => e.id === mirrored.id)).toBeTruthy();
   });
 
   it('rejects malformed input', async () => {

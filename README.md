@@ -78,8 +78,8 @@ The native apps (in progress, see `docs/apple-and-proxmox-plan.md`) sign in with
 `PUT /api/device/events` with `{ from, to, events, blockChanges? }`
 
 - `events`: every event on the device's calendars in the window, except the "Planner" calendar the app writes task blocks into. Each has `externalId` (one per occurrence for recurring events), `title`, `startAt`, `endAt`, and optional `notes` and `allDay`. This replaces the previous mirror for the window, so the scheduler plans around real busy time. Mirrored events are read-only in Planner.
-- `blockChanges`: task blocks the user moved (`{ id, startAt, endAt }`) or deleted (`{ id, deleted: true }`) in Apple Calendar since the last sync.
-- Response: `{ upserted, removed, blocks, rejected }`, where `blocks` are the task blocks in the window as the server now has them; the app makes its "Planner" calendar match.
+- `blockChanges`: events Planner wrote to Apple Calendar (task blocks and events created in Planner) that the user moved (`{ id, startAt, endAt }`) or deleted (`{ id, deleted: true }`) since the last sync.
+- Response: `{ upserted, removed, blocks, rejected }`, where `blocks` are all events created in Planner in the window (task blocks and plain events) as the server now has them; the app makes its "Planner" calendar match.
 
 When the apps are the calendar bridge, leave Google sync disconnected so events don't appear twice.
 

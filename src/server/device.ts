@@ -11,11 +11,13 @@ const when = z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'Not a valid
  * events: everything on the device's calendars inside [from, to), except the
  *   "Planner" calendar the app writes task blocks into. Replaces the previous
  *   mirror for that window, so the scheduler sees real busy time.
- * blockChanges: task blocks the user moved or deleted in Apple Calendar since
- *   the last sync. The app knows because it remembers which blocks it wrote.
+ * blockChanges: Planner events (task blocks and events created in Planner) the
+ *   user moved or deleted in Apple Calendar since the last sync. The app knows
+ *   because it remembers which ones it wrote.
  *
- * The response lists the task blocks in the window as the server now has them;
- * the app makes the Planner calendar match it.
+ * The response lists the Planner events in the window as the server now has
+ * them (`blocks`, named for task blocks, which came first); the app makes the
+ * Planner calendar match it.
  */
 export const DeviceSync = z.object({
   from: when,
@@ -49,6 +51,7 @@ export type DeviceSyncInput = z.infer<typeof DeviceSync>;
 export interface DeviceSyncResult {
   upserted: number;
   removed: number;
+  /** Events created in Planner, task blocks and plain events alike. */
   blocks: CalEvent[];
   /** Block changes that could not be applied, with the reason. */
   rejected: { id: string; reason: string }[];
@@ -89,13 +92,13 @@ export async function syncDevice(planner: Planner, input: DeviceSyncInput): Prom
     throw err;
   }
 
-  // Apply what the user did to task blocks in Apple Calendar.
+  // Apply what the user did in Apple Calendar to events Planner wrote there.
   const rejected: DeviceSyncResult['rejected'] = [];
   for (const c of input.blockChanges ?? []) {
     const block = store.getEvent(c.id);
     if (!block) continue; // already gone: nothing to do
-    if (!block.taskId) {
-      rejected.push({ id: c.id, reason: 'Not a task block.' });
+    if (block.source !== 'local') {
+      rejected.push({ id: c.id, reason: 'Not an event created in Planner.' });
       continue;
     }
     try {
@@ -107,6 +110,8 @@ export async function syncDevice(planner: Planner, input: DeviceSyncInput): Prom
     }
   }
 
-  const blocks = store.listEvents({ from, to }).filter((e) => e.taskId);
+  // Only Planner's own events: device events came from the device, and Google
+  // events reach the device through the Google account itself.
+  const blocks = store.listEvents({ from, to }).filter((e) => e.source === 'local');
   return { upserted, removed, blocks, rejected };
 }

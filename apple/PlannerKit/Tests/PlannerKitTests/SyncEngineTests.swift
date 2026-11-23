@@ -152,6 +152,25 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertTrue(engine.ledger.entries.isEmpty)
     }
 
+    func testWritesPlainPlannerEventsKeepingNotesAndAllDay() async throws {
+        let dentist = """
+        {"id":"e5","title":"Dentist","notes":"Bring insurance card","startAt":"2026-11-24T15:00:00.000Z","endAt":"2026-11-24T16:00:00.000Z","allDay":false,"taskId":null,"googleId":null,"externalId":null,"source":"local"}
+        """
+        let holiday = """
+        {"id":"e6","title":"Day off","notes":"","startAt":"2026-11-27T05:00:00.000Z","endAt":"2026-11-28T04:59:59.000Z","allDay":true,"taskId":null,"googleId":null,"externalId":null,"source":"local"}
+        """
+        serverReturns([block1, dentist, holiday])
+        let engine = makeEngine()
+
+        try await engine.sync()
+
+        XCTAssertEqual(Set(plannerBlocks.map(\.title)), ["Write report", "Dentist", "Day off"])
+        XCTAssertEqual(plannerBlocks.first { $0.title == "Dentist" }?.notes, "Bring insurance card")
+        XCTAssertEqual(plannerBlocks.first { $0.title == "Write report" }?.notes, "Booked by Planner.")
+        XCTAssertEqual(plannerBlocks.first { $0.title == "Day off" }?.allDay, true)
+        XCTAssertEqual(engine.ledger.entries.count, 3)
+    }
+
     func testRemovesBlocksTheServerNoLongerHas() async throws {
         serverReturns([block1, Fixture.block(id: "b2", title: "Plan trip", start: "2026-11-24T10:00:00.000Z", end: "2026-11-24T11:00:00.000Z")])
         let engine = makeEngine()

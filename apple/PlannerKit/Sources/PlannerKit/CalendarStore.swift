@@ -67,9 +67,16 @@ public protocol CalendarStore: AnyObject {
     /// Events overlapping [from, to) in the given calendars (all calendars when nil).
     func events(from: Date, to: Date, in calendarIDs: Set<String>?) -> [DeviceEvent]
     func event(withIdentifier identifier: String) -> DeviceEvent?
-    /// Creates the block, or updates it when `identifier` names an existing event. Returns its identifier.
-    func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, in calendarID: String) throws -> String
+    /// Creates the event, or updates it when `identifier` names an existing one. Returns its identifier.
+    func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, allDay: Bool, in calendarID: String) throws -> String
     func removeEvent(withIdentifier identifier: String) throws
+}
+
+extension CalendarStore {
+    /// A timed (not all-day) event.
+    public func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, in calendarID: String) throws -> String {
+        try saveBlock(identifier: identifier, title: title, notes: notes, start: start, end: end, allDay: false, in: calendarID)
+    }
 }
 
 // MARK: - In memory, for tests and SwiftUI previews
@@ -112,8 +119,8 @@ public final class InMemoryCalendarStore: CalendarStore {
         items.first { $0.identifier == identifier }
     }
 
-    public func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, in calendarID: String) throws -> String {
-        let event = DeviceEvent(identifier: identifier ?? UUID().uuidString, calendarID: calendarID, title: title, notes: notes, start: start, end: end)
+    public func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, allDay: Bool, in calendarID: String) throws -> String {
+        let event = DeviceEvent(identifier: identifier ?? UUID().uuidString, calendarID: calendarID, title: title, notes: notes, start: start, end: end, allDay: allDay)
         if let index = items.firstIndex(where: { $0.identifier == event.identifier }) {
             items[index] = event
         } else {
@@ -170,19 +177,29 @@ public final class EventKitCalendarStore: CalendarStore {
         }
         guard create else { return nil }
 
-        let calendar = EKCalendar(for: .event, eventStore: eventStore)
-        calendar.title = Self.plannerCalendarTitle
-        // Prefer the account new events already go to (usually iCloud), so the
-        // calendar shows up on every device; fall back to an on-device calendar.
+        // iCloud first, so the calendar shows up on every device. Some accounts
+        // (Google, Exchange) don't let apps add calendars, so try each in turn
+        // and fall back to a calendar on this device.
         let sources = eventStore.sources
-        guard let source = eventStore.defaultCalendarForNewEvents?.source
-            ?? sources.first(where: { $0.sourceType == .calDAV && $0.title == "iCloud" })
-            ?? sources.first(where: { $0.sourceType == .local })
-        else { throw CalendarStoreError.noWritableSource }
-        calendar.source = source
-        try eventStore.saveCalendar(calendar, commit: true)
-        defaults.set(calendar.calendarIdentifier, forKey: Self.plannerCalendarKey)
-        return calendar.calendarIdentifier
+        var candidates = sources.filter { $0.sourceType == .calDAV && $0.title == "iCloud" }
+        if let preferred = eventStore.defaultCalendarForNewEvents?.source { candidates.append(preferred) }
+        candidates += sources.filter { $0.sourceType == .local }
+
+        var tried = Set<String>()
+        var lastError: Error = CalendarStoreError.noWritableSource
+        for source in candidates where tried.insert(source.sourceIdentifier).inserted {
+            let calendar = EKCalendar(for: .event, eventStore: eventStore)
+            calendar.title = Self.plannerCalendarTitle
+            calendar.source = source
+            do {
+                try eventStore.saveCalendar(calendar, commit: true)
+                defaults.set(calendar.calendarIdentifier, forKey: Self.plannerCalendarKey)
+                return calendar.calendarIdentifier
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
     }
 
     public func events(from: Date, to: Date, in calendarIDs: Set<String>?) -> [DeviceEvent] {
@@ -200,7 +217,7 @@ public final class EventKitCalendarStore: CalendarStore {
         eventStore.event(withIdentifier: identifier).map(DeviceEvent.init)
     }
 
-    public func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, in calendarID: String) throws -> String {
+    public func saveBlock(identifier: String?, title: String, notes: String, start: Date, end: Date, allDay: Bool, in calendarID: String) throws -> String {
         guard let calendar = eventStore.calendar(withIdentifier: calendarID) else { throw CalendarStoreError.calendarMissing }
         let event = identifier.flatMap { eventStore.event(withIdentifier: $0) } ?? EKEvent(eventStore: eventStore)
         event.calendar = calendar
@@ -208,7 +225,7 @@ public final class EventKitCalendarStore: CalendarStore {
         event.notes = notes
         event.startDate = start
         event.endDate = end
-        event.isAllDay = false
+        event.isAllDay = allDay
         try eventStore.save(event, span: .thisEvent, commit: true)
         guard let id = event.eventIdentifier else { throw CalendarStoreError.calendarMissing }
         return id

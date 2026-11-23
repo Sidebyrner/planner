@@ -131,7 +131,7 @@ public final class SyncEngine {
         for block in blocks {
             let entry = ledger.entries[block.id]
             let existing = entry.flatMap { calendar.event(withIdentifier: $0.deviceID) }
-            if let existing, existing.calendarID == plannerID, existing.title == block.title,
+            if let existing, existing.calendarID == plannerID, existing.title == block.title, existing.allDay == block.allDay,
                sameTime(existing.start, block.startAt), sameTime(existing.end, block.endAt) {
                 ledger.entries[block.id] = .init(deviceID: existing.identifier, start: block.startAt, end: block.endAt)
                 continue
@@ -139,9 +139,10 @@ public final class SyncEngine {
             let deviceID = try calendar.saveBlock(
                 identifier: existing?.identifier,
                 title: block.title,
-                notes: "Booked by Planner.",
+                notes: block.isTaskBlock ? "Booked by Planner." : block.notes,
                 start: block.startAt,
                 end: block.endAt,
+                allDay: block.allDay,
                 in: plannerID
             )
             ledger.entries[block.id] = .init(deviceID: deviceID, start: block.startAt, end: block.endAt)
