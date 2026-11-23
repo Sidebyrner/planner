@@ -6,6 +6,8 @@ import { randomToken } from './auth.js';
 const env = process.env;
 const production = env.NODE_ENV === 'production';
 const port = Number(env.PORT ?? 8787);
+// Unset listens on every interface. Behind a local proxy (tailscale serve), set HOST=127.0.0.1.
+const host = env.HOST || undefined;
 const publicUrl = (env.PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, '');
 const dbPath = resolve(env.DATABASE_PATH ?? './data/planner.db');
 
@@ -36,8 +38,11 @@ const { app } = createApp({
   staticDir: join(import.meta.dirname, '../web'),
 });
 
-app.listen(port, () => {
-  console.log(`Planner running at ${publicUrl}`);
+const onListening = () => {
+  console.log(`Planner running at ${publicUrl} (listening on ${host ?? 'all interfaces'}:${port})`);
   console.log(`MCP endpoint: ${publicUrl}/mcp`);
   if (!env.APP_PASSWORD) console.log('No APP_PASSWORD set: the app is open to anyone who can reach this port.');
-});
+};
+
+if (host) app.listen(port, host, onListening);
+else app.listen(port, onListening);

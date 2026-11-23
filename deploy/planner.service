@@ -1,0 +1,27 @@
+# Planner server. Install with:
+#   install -m 644 /opt/planner/deploy/planner.service /etc/systemd/system/planner.service
+#   systemctl daemon-reload && systemctl enable --now planner
+# Config and secrets live in /etc/planner.env (mode 600, root-owned).
+[Unit]
+Description=Planner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=planner
+Group=planner
+WorkingDirectory=/opt/planner
+EnvironmentFile=/etc/planner.env
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/server/index.js
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/planner
+
+[Install]
+WantedBy=multi-user.target
