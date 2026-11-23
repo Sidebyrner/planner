@@ -103,6 +103,27 @@ public struct PlannerAPI: Sendable {
         return try await call("POST", "api/schedule/apply", body: Body(blocks: blocks))
     }
 
+    public func projects() async throws -> [Project] {
+        try await call("GET", "api/projects")
+    }
+
+    /// `patch.name` is required when creating.
+    public func createProject(_ patch: ProjectPatch) async throws -> Project {
+        try await call("POST", "api/projects", body: patch)
+    }
+
+    public func updateProject(id: String, _ patch: ProjectPatch) async throws -> Project {
+        try await call("PATCH", "api/projects/\(id)", body: patch)
+    }
+
+    public enum ProjectRemoval: String, Decodable, Sendable { case deleted, archived }
+
+    /// Deletes an unused project; archives one that has tasks.
+    public func removeProject(id: String) async throws -> ProjectRemoval {
+        struct Result: Decodable { var result: ProjectRemoval }
+        return try await call("DELETE", "api/projects/\(id)", as: Result.self).result
+    }
+
     public func updateSettings(_ patch: SettingsPatch) async throws -> Settings {
         try await call("PUT", "api/settings", body: patch)
     }

@@ -1,20 +1,30 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
-import type { AppState } from '../shared/types.js';
+import { PROJECT_COLORS, type AppState } from '../shared/types.js';
 import { randomToken, type Auth } from './auth.js';
 import { DeviceSync, syncDevice } from './device.js';
 import { NotFound, ReadOnly, type Planner } from './planner.js';
 
 const when = z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'Not a valid date');
+const hm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+
+export const ChecklistSchema = z
+  .array(z.object({ id: z.string().min(1).max(100), text: z.string().trim().min(1).max(500), done: z.boolean() }))
+  .max(100);
+
 const taskFields = {
   title: z.string().trim().min(1).max(300),
   notes: z.string().max(5000),
   priority: z.number().int().min(1).max(3),
   estimateMin: z.number().int().min(5).max(24 * 60),
   dueAt: when.nullable(),
-  status: z.enum(['todo', 'done']),
+  status: z.enum(['todo', 'waiting', 'done']),
+  projectId: z.string().nullable(),
+  checklist: ChecklistSchema,
+  waitingOn: z.string().trim().max(100).nullable(),
+  followUpAt: when.nullable(),
 };
-const TaskCreate = z.object(taskFields).partial().required({ title: true }).omit({ status: true });
+const TaskCreate = z.object(taskFields).partial().required({ title: true });
 const TaskPatch = z.object(taskFields).partial();
 
 const eventFields = {
@@ -24,9 +34,31 @@ const eventFields = {
   endAt: when,
   allDay: z.boolean(),
   taskId: z.string().nullable(),
+  projectId: z.string().nullable(),
 };
 const EventCreate = z.object(eventFields).partial().required({ title: true, startAt: true, endAt: true });
 const EventPatch = z.object(eventFields).partial().omit({ taskId: true });
+
+export const WindowSchema = z
+  .object({ days: z.array(z.number().int().min(1).max(7)).min(1), start: hm, end: hm })
+  .refine((w) => w.end > w.start, 'A window must end after it starts');
+const projectFields = {
+  name: z.string().trim().min(1).max(80),
+  tag: z.string().trim().min(1).max(40),
+  color: z.enum(PROJECT_COLORS),
+  emoji: z.string().max(16),
+  archived: z.boolean(),
+  sortOrder: z.number().int(),
+  windows: z.array(WindowSchema).max(14),
+  windowStrict: z.boolean(),
+  hostMatch: z.string().trim().max(100).nullable(),
+};
+const ProjectCreate = z.object(projectFields).partial().required({ name: true });
+const ProjectPatch = z.object(projectFields).partial();
+
+const Booking = z
+  .object({ taskId: z.string().optional(), taskIds: z.array(z.string()).min(1).max(20).optional(), startAt: when, endAt: when })
+  .refine((b) => b.taskId || b.taskIds, 'Each block needs a taskId or taskIds');
 
 const SettingsPatch = z
   .object({
@@ -44,6 +76,8 @@ const SettingsPatch = z
     workDays: z.array(z.number().int().min(1).max(7)),
     maxBlockMin: z.number().int().min(30).max(480),
     horizonDays: z.number().int().min(1).max(60),
+    bufferMin: z.number().int().min(0).max(120),
+    bufferMinEventMin: z.number().int().min(15).max(24 * 60),
   })
   .partial();
 
@@ -76,6 +110,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
 
   const state = (): AppState => ({
     tasks: planner.listTasks(),
+    projects: planner.listProjects({ includeArchived: true }),
     // The client keeps a generous window so week-to-week navigation needs no refetch.
     events: planner.listEvents({
       from: new Date(Date.now() - 45 * 86400_000).toISOString(),
@@ -87,8 +122,14 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
 
   r.get('/state', h(async () => {
     await planner.syncIfStale().catch(() => {});
+    planner.resurfaceWaiting();
     return state();
   }));
+
+  r.get('/projects', h(() => planner.listProjects({ includeArchived: true })));
+  r.post('/projects', h((req) => planner.createProject(ProjectCreate.parse(req.body))));
+  r.patch('/projects/:id', h((req) => planner.updateProject(String(req.params.id), ProjectPatch.parse(req.body))));
+  r.delete('/projects/:id', h((req) => planner.removeProject(String(req.params.id))));
 
   r.post('/tasks', h((req) => planner.createTask(TaskCreate.parse(req.body))));
   r.patch('/tasks/:id', h((req) => planner.updateTask(String(req.params.id), TaskPatch.parse(req.body))));
@@ -105,7 +146,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
 
   r.post('/schedule/propose', h(() => planner.propose()));
   r.post('/schedule/apply', h((req) => {
-    const { blocks } = z.object({ blocks: z.array(z.object({ taskId: z.string(), startAt: when, endAt: when })).min(1) }).parse(req.body);
+    const { blocks } = z.object({ blocks: z.array(Booking).min(1) }).parse(req.body);
     return planner.apply(blocks);
   }));
 
@@ -151,7 +192,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     if (err instanceof NotFound) return void res.status(404).json({ error: err.message });
     if (err instanceof ReadOnly) return void res.status(409).json({ error: err.message });
     const message = err instanceof Error ? err.message : 'Something went wrong.';
-    const expected = /must end after|Invalid date|Google|sync window/.test(message);
+    const expected = /must end after|Invalid date|Google|sync window|already a project|project (needs|tag needs)/.test(message);
     if (!expected) console.error(err);
     res.status(expected ? 400 : 500).json({ error: expected ? message : 'Something went wrong on the server.' });
   });

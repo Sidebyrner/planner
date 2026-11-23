@@ -33,13 +33,18 @@ enum Format {
     }
 
     /// One line describing how the server read a capture.
-    static func captured(_ c: Captured) -> String {
+    static func captured(_ c: Captured, projectName: String? = nil) -> String {
+        let project = c.newProject.map { "new project #\($0)" } ?? projectName
         switch c.kind {
         case .event:
             guard let start = c.startAt, let end = c.endAt else { return "Event: \(c.title)" }
-            return "Event · \(c.title) · \(dayTime(start))–\(time(end))"
+            return ["Event · \(c.title)", project, "\(dayTime(start))–\(time(end))"].compactMap { $0 }.joined(separator: " · ")
         case .task:
+            if let who = c.waitingOn {
+                return ["Waiting on \(who) · \(c.title)", project, c.followUpAt.map { "follow up \(relative($0))" }].compactMap { $0 }.joined(separator: " · ")
+            }
             var parts = ["Task · \(c.title)"]
+            if let project { parts.append(project) }
             if let due = c.dueAt { parts.append("due \(relative(due))") }
             if let estimate = c.estimateMin { parts.append(duration(estimate)) }
             if let priority = priority(c.priority) { parts.append("\(priority.lowercased()) priority") }

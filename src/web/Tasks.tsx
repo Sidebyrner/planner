@@ -1,10 +1,13 @@
-import type { CalEvent, Task } from '../shared/types';
+import { useState } from 'react';
+import type { CalEvent, Project, Task } from '../shared/types';
 import { drag } from './Calendar';
+import { projectLabel, projectStyle, type ProjectMap } from './projects';
 import { fmtDuration, fmtWhen } from './util';
 
 interface Props {
   tasks: Task[];
   events: CalEvent[];
+  projects: ProjectMap;
   litTaskId: string | null;
   onHoverTask: (id: string | null) => void;
   onToggle: (t: Task) => void;
@@ -12,27 +15,53 @@ interface Props {
   onShowBlock: (e: CalEvent) => void;
 }
 
-export function Tasks({ tasks, events, litTaskId, onHoverTask, onToggle, onOpen, onShowBlock }: Props) {
+/** 'all', 'none' (no project), or a project id. */
+type Filter = string;
+
+export function ProjectChip({ project }: { project: Project | undefined }) {
+  if (!project) return null;
+  return (
+    <span className="proj-chip" style={projectStyle(project)}>
+      {projectLabel(project)}
+    </span>
+  );
+}
+
+export function Tasks({ tasks, events, projects, litTaskId, onHoverTask, onToggle, onOpen, onShowBlock }: Props) {
+  const [filter, setFilter] = useState<Filter>('all');
   const now = Date.now();
   const nextBlock = new Map<string, CalEvent>();
   const booked = new Map<string, number>();
   for (const e of events) {
-    if (!e.taskId || Date.parse(e.endAt) <= now) continue;
-    if (!nextBlock.has(e.taskId)) nextBlock.set(e.taskId, e);
-    booked.set(e.taskId, (booked.get(e.taskId) ?? 0) + (Date.parse(e.endAt) - Date.parse(e.startAt)) / 60_000);
+    if (Date.parse(e.endAt) <= now) continue;
+    const ids = e.taskId ? [e.taskId] : e.taskIds;
+    for (const id of ids) {
+      if (!nextBlock.has(id)) nextBlock.set(id, e);
+      // A Quick batch covers each of its tasks completely.
+      const minutes = e.taskId ? (Date.parse(e.endAt) - Date.parse(e.startAt)) / 60_000 : Infinity;
+      booked.set(id, (booked.get(id) ?? 0) + minutes);
+    }
   }
 
-  const open = tasks
+  const visible = tasks.filter((t) => filter === 'all' || (filter === 'none' ? !t.projectId : t.projectId === filter));
+  const open = visible
     .filter((t) => t.status === 'todo')
     .sort((a, b) => {
       const da = a.dueAt ? Date.parse(a.dueAt) : Infinity;
       const db = b.dueAt ? Date.parse(b.dueAt) : Infinity;
-      return da - db || b.priority - a.priority || a.createdAt.localeCompare(b.createdAt);
+      // Follow-ups that came back go first: someone else's turn is over.
+      return Number(!!b.waitingOn) - Number(!!a.waitingOn) || da - db || b.priority - a.priority || a.createdAt.localeCompare(b.createdAt);
     });
-  const done = tasks
+  const waiting = visible
+    .filter((t) => t.status === 'waiting')
+    .sort((a, b) => (a.followUpAt ?? '9').localeCompare(b.followUpAt ?? '9'));
+  const done = visible
     .filter((t) => t.status === 'done')
     .sort((a, b) => (b.completedAt ?? '').localeCompare(a.completedAt ?? ''))
     .slice(0, 30);
+
+  const live = [...projects.values()].filter((p) => !p.archived);
+  const openCount = (id: string | null) => tasks.filter((t) => t.status === 'todo' && (t.projectId ?? null) === id).length;
 
   return (
     <section className="tasks" aria-label="Tasks">
@@ -41,8 +70,26 @@ export function Tasks({ tasks, events, litTaskId, onHoverTask, onToggle, onOpen,
         <span className="count">{open.length} open</span>
       </header>
 
+      {live.length > 0 && (
+        <nav className="proj-filter" aria-label="Filter by project">
+          <button className={filter === 'all' ? 'is-on' : ''} onClick={() => setFilter('all')}>
+            All
+          </button>
+          {live.map((p) => (
+            <button key={p.id} className={filter === p.id ? 'is-on' : ''} style={projectStyle(p)} onClick={() => setFilter(p.id)}>
+              <i className="dot" aria-hidden="true" />
+              {projectLabel(p)}
+              <small>{openCount(p.id) || ''}</small>
+            </button>
+          ))}
+          <button className={filter === 'none' ? 'is-on' : ''} onClick={() => setFilter('none')}>
+            No project
+          </button>
+        </nav>
+      )}
+
       {open.length === 0 && (
-        <p className="empty">Nothing open. Type a task in the bar above, or have your agent add one.</p>
+        <p className="empty">Nothing open. Type a task in the bar above (add #project to file it), or have your agent add one.</p>
       )}
 
       <ul className="task-list">
@@ -50,10 +97,13 @@ export function Tasks({ tasks, events, litTaskId, onHoverTask, onToggle, onOpen,
           const block = nextBlock.get(t.id);
           const left = Math.max(0, t.estimateMin - (booked.get(t.id) ?? 0));
           const overdue = !!t.dueAt && Date.parse(t.dueAt) < now;
+          const project = t.projectId ? projects.get(t.projectId) : undefined;
+          const steps = t.checklist.length ? `${t.checklist.filter((c) => c.done).length}/${t.checklist.length}` : null;
           return (
             <li
               key={t.id}
-              className={`task${litTaskId === t.id ? ' is-lit' : ''}`}
+              className={`task${litTaskId === t.id ? ' is-lit' : ''}${project ? ' has-project' : ''}`}
+              style={projectStyle(project)}
               draggable
               onDragStart={(ev) => {
                 drag.current = { kind: 'task', id: t.id, minutes: left || t.estimateMin };
@@ -72,7 +122,10 @@ export function Tasks({ tasks, events, litTaskId, onHoverTask, onToggle, onOpen,
                   {t.title}
                 </span>
                 <span className="task-meta">
+                  {filter === 'all' && <ProjectChip project={project} />}
+                  {t.waitingOn && <span className="is-followup">Follow up with {t.waitingOn}</span>}
                   <span>{fmtDuration(t.estimateMin)}</span>
+                  {steps && <span>☑ {steps}</span>}
                   {t.dueAt && <span className={overdue ? 'is-overdue' : ''}>{overdue ? 'was due' : 'due'} {fmtWhen(t.dueAt)}</span>}
                 </span>
               </button>
@@ -88,6 +141,27 @@ export function Tasks({ tasks, events, litTaskId, onHoverTask, onToggle, onOpen,
           );
         })}
       </ul>
+
+      {waiting.length > 0 && (
+        <details className="waiting" open>
+          <summary>Waiting on others ({waiting.length})</summary>
+          <ul className="task-list">
+            {waiting.map((t) => (
+              <li key={t.id} className="task is-waiting" style={projectStyle(t.projectId ? projects.get(t.projectId) : undefined)}>
+                <span className="wait-icon" aria-hidden="true">⏳</span>
+                <button className="task-main" onClick={() => onOpen(t)}>
+                  <span className="task-title">{t.title}</span>
+                  <span className="task-meta">
+                    {filter === 'all' && <ProjectChip project={t.projectId ? projects.get(t.projectId) : undefined} />}
+                    <span>{t.waitingOn ? `Waiting on ${t.waitingOn}` : 'Waiting'}</span>
+                    {t.followUpAt && <span>follow up {fmtWhen(t.followUpAt)}</span>}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
 
       {done.length > 0 && (
         <details className="done">

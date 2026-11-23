@@ -26,8 +26,8 @@ struct ContentView: View {
     private var main: some View {
         #if os(macOS)
         NavigationSplitView {
-            TaskListView()
-                .navigationSplitViewColumnWidth(min: 300, ideal: 340)
+            SidebarView()
+                .navigationSplitViewColumnWidth(min: 320, ideal: 360)
         } detail: {
             VStack(spacing: 0) {
                 SyncBanner()
@@ -36,6 +36,14 @@ struct ContentView: View {
         }
         #else
         TabView {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    SyncBanner()
+                    TodayView()
+                }
+            }
+            .tabItem { Label("Today", systemImage: "sun.max") }
+
             NavigationStack {
                 VStack(spacing: 0) {
                     SyncBanner()
@@ -60,6 +68,30 @@ struct ContentView: View {
         #endif
     }
 }
+
+#if os(macOS)
+/// The Mac sidebar: Today at a glance, or the full task list.
+struct SidebarView: View {
+    enum Pane: String, CaseIterable { case today = "Today", tasks = "Tasks" }
+    @State private var pane: Pane = .today
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("View", selection: $pane) {
+                ForEach(Pane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            switch pane {
+            case .today: TodayView()
+            case .tasks: TaskListView()
+            }
+        }
+    }
+}
+#endif
 
 /// Shown when the last sync failed or the server changed a block back.
 struct SyncBanner: View {

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { AppState, CalEvent, Captured, ProposedBlock, ScheduleProposal, Task } from '../shared/types';
 import { Calendar } from './Calendar';
-import { EventDialog, SettingsDialog, TaskDialog, type EventDraft } from './Dialogs';
+import { EventDialog, ProjectsDialog, SettingsDialog, TaskDialog, type EventDraft } from './Dialogs';
+import { projectMap } from './projects';
 import { Tasks } from './Tasks';
 import { addDays, api, ApiError, fmtDay, fmtDuration, fmtMonth, fmtTime, fmtWhen, startOfDay, startOfWeek } from './util';
 
@@ -16,9 +17,11 @@ function useDayCount(): number {
   return n;
 }
 
-function describe(c: Captured): string {
-  if (c.kind === 'event') return `Event "${c.title}" ${fmtWhen(c.startAt!)} to ${fmtTime(c.endAt!)}`;
-  const parts = [`Task "${c.title}"`];
+function describe(c: Captured, projectName?: string): string {
+  const where = c.newProject ? ` in new project #${c.newProject}` : projectName ? ` in ${projectName}` : '';
+  if (c.kind === 'event') return `Event "${c.title}"${where} ${fmtWhen(c.startAt!)} to ${fmtTime(c.endAt!)}`;
+  if (c.waitingOn) return `Waiting on ${c.waitingOn}: "${c.title}"${where}, follow up ${fmtWhen(c.followUpAt!)}`;
+  const parts = [`Task "${c.title}"${where}`];
   if (c.dueAt) parts.push(`due ${fmtWhen(c.dueAt)}`);
   if (c.estimateMin) parts.push(fmtDuration(c.estimateMin));
   if (c.priority !== 2) parts.push(c.priority === 3 ? 'high priority' : 'low priority');
@@ -37,6 +40,7 @@ export function App() {
   const [taskOpen, setTaskOpen] = useState<Task | null>(null);
   const [eventOpen, setEventOpen] = useState<EventDraft | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [projectsOpen, setProjectsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const days = useDayCount();
 
@@ -110,6 +114,7 @@ export function App() {
   };
 
   const start = useMemo(() => (days === 7 ? startOfWeek(anchor) : anchor), [days, anchor]);
+  const projects = useMemo(() => projectMap(state?.projects ?? []), [state?.projects]);
   const show = (date: string | Date) => {
     setAnchor(startOfDay(new Date(date)));
     setPane('calendar');
@@ -160,6 +165,7 @@ export function App() {
       <header className="top">
         <h1>Planner</h1>
         <Capture
+          projectName={(id) => projects.get(id)?.name}
           onCaptured={(text) => {
             setNotice({ text });
             void reload();
@@ -169,6 +175,9 @@ export function App() {
         />
         <button className="btn btn-plan" onClick={plan} disabled={busy}>
           Plan my tasks
+        </button>
+        <button className="btn" onClick={() => setProjectsOpen(true)}>
+          Projects
         </button>
         <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
           <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
@@ -226,6 +235,7 @@ export function App() {
         <Tasks
           tasks={state.tasks}
           events={state.events}
+          projects={projects}
           litTaskId={litTaskId}
           onHoverTask={setLitTaskId}
           onToggle={(t) => act(() => api('PATCH', `/tasks/${t.id}`, { status: t.status === 'todo' ? 'done' : 'todo' }))}
@@ -259,6 +269,7 @@ export function App() {
             events={state.events}
             proposals={proposal?.blocks ?? []}
             settings={state.settings}
+            projects={projects}
             litTaskId={litTaskId}
             onHoverTask={setLitTaskId}
             onOpenEvent={setEventOpen}
@@ -281,6 +292,7 @@ export function App() {
       {taskOpen && (
         <TaskDialog
           task={taskOpen}
+          projects={state.projects}
           onClose={() => setTaskOpen(null)}
           onSave={async (patch) => {
             await actStrict(() => api('PATCH', `/tasks/${taskOpen.id}`, patch));
@@ -316,6 +328,15 @@ export function App() {
         />
       )}
 
+      {projectsOpen && (
+        <ProjectsDialog
+          projects={state.projects}
+          onClose={() => setProjectsOpen(false)}
+          onSave={({ id, ...fields }) => actStrict(() => (id ? api('PATCH', `/projects/${id}`, fields) : api('POST', '/projects', { ...fields, tag: fields.tag || undefined })))}
+          onRemove={(id) => actStrict(() => api('DELETE', `/projects/${id}`))}
+        />
+      )}
+
       {settingsOpen && (
         <SettingsDialog
           settings={state.settings}
@@ -335,7 +356,12 @@ export function App() {
   );
 }
 
-function Capture(props: { onCaptured: (summary: string) => void; onShow: (date: string) => void; onError: (e: unknown) => void }) {
+function Capture(props: {
+  projectName: (id: string) => string | undefined;
+  onCaptured: (summary: string) => void;
+  onShow: (date: string) => void;
+  onError: (e: unknown) => void;
+}) {
   const [text, setText] = useState('');
   const [preview, setPreview] = useState<Captured | null>(null);
   const [busy, setBusy] = useState(false);
@@ -377,7 +403,7 @@ function Capture(props: { onCaptured: (summary: string) => void; onShow: (date: 
       const r = await api('POST', '/capture', { text: value });
       setText('');
       setPreview(null);
-      props.onCaptured(`Added: ${describe(r.parsed)}.`);
+      props.onCaptured(`Added: ${describe(r.parsed, r.parsed.projectId ? props.projectName(r.parsed.projectId) : undefined)}.`);
       if (r.event) props.onShow(r.event.startAt);
     } catch (err) {
       props.onError(err);
@@ -392,7 +418,7 @@ function Capture(props: { onCaptured: (summary: string) => void; onShow: (date: 
         ref={input}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder="Add a task or event, like “Draft proposal by Friday 2h”"
+        placeholder="Add a task or event, like “Draft proposal by Friday 2h #work” or “@Sam send invoice Fri”"
         aria-label="Add a task or event"
         aria-describedby="capture-preview"
         autoComplete="off"
@@ -401,7 +427,7 @@ function Capture(props: { onCaptured: (summary: string) => void; onShow: (date: 
         Add
       </button>
       <p id="capture-preview" className="capture-preview" aria-live="polite">
-        {preview ? describe(preview) : ''}
+        {preview ? describe(preview, preview.projectId ? props.projectName(preview.projectId) : undefined) : ''}
       </p>
     </form>
   );

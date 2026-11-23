@@ -109,6 +109,102 @@ describe('web API', () => {
   });
 });
 
+describe('projects, waiting-on and batches', () => {
+  it('creates, renames, archives and deletes projects', async () => {
+    const created = (await api('POST', '/api/projects', { name: "Mr Smith's Bar", emoji: '🍺', color: 'amber' })).body;
+    expect(created).toMatchObject({ tag: 'mr-smiths-bar', archived: false, windows: [] });
+    expect((await api('POST', '/api/projects', { name: 'Again', tag: 'mr-smiths-bar' })).body.error).toMatch(/already a project/);
+
+    const renamed = (await api('PATCH', `/api/projects/${created.id}`, { tag: 'bar', windows: [{ days: [6, 7], start: '10:00', end: '12:00' }] })).body;
+    expect(renamed).toMatchObject({ tag: 'bar', windows: [{ days: [6, 7], start: '10:00', end: '12:00' }] });
+    expect((await api('PATCH', `/api/projects/${created.id}`, { windows: [{ days: [1], start: '12:00', end: '10:00' }] })).status).toBe(400);
+
+    // In use: archived, not deleted.
+    await api('POST', '/api/tasks', { title: 'Order kegs', projectId: created.id });
+    expect((await api('DELETE', `/api/projects/${created.id}`)).body).toEqual({ result: 'archived' });
+    const empty = (await api('POST', '/api/projects', { name: 'Empty' })).body;
+    expect((await api('DELETE', `/api/projects/${empty.id}`)).body).toEqual({ result: 'deleted' });
+    expect((await api('GET', '/api/state')).body.projects.map((p: any) => [p.tag, p.archived])).toEqual([['bar', true]]);
+  });
+
+  it('captures #tags into projects, creating unknown ones', async () => {
+    const bar = (await api('POST', '/api/projects', { name: 'Bar', tag: 'bar' })).body;
+    const preview = (await api('POST', '/api/capture', { text: 'Order kegs #bar 15m', preview: true })).body.parsed;
+    expect(preview).toMatchObject({ title: 'Order kegs', projectId: bar.id, newProject: null, estimateMin: 15 });
+
+    const fresh = (await api('POST', '/api/capture', { text: 'Update CV #career by Friday' })).body;
+    expect(fresh.parsed).toMatchObject({ newProject: 'career', projectId: null });
+    expect(fresh.project).toMatchObject({ tag: 'career' });
+    expect(fresh.task.projectId).toBe(fresh.project.id);
+
+    // A unique prefix is enough once the project exists.
+    expect((await api('POST', '/api/capture', { text: 'Print menus #ba', preview: true })).body.parsed.projectId).toBe(bar.id);
+  });
+
+  it('captures @Name as a waiting task that is never scheduled and comes back on its follow-up date', async () => {
+    server.close();
+    const planner = await start();
+    const { task } = (await api('POST', '/api/capture', { text: '@Sam send the invoice tomorrow' })).body;
+    expect(task).toMatchObject({ title: 'send the invoice', status: 'waiting', waitingOn: 'Sam', dueAt: null });
+    expect(Date.parse(task.followUpAt)).toBeGreaterThan(Date.now());
+    expect((await api('POST', '/api/schedule/propose')).body.blocks).toEqual([]);
+
+    planner.store.updateTask(task.id, { followUpAt: new Date(Date.now() - 60_000).toISOString() });
+    const back = (await api('GET', '/api/state')).body.tasks.find((t: any) => t.id === task.id);
+    expect(back).toMatchObject({ status: 'todo', waitingOn: 'Sam' });
+  });
+
+  it('releases booked time when a task is handed to someone else', async () => {
+    const task = (await api('POST', '/api/tasks', { title: 'Write report', estimateMin: 60 })).body;
+    const proposal = (await api('POST', '/api/schedule/propose')).body;
+    await api('POST', '/api/schedule/apply', { blocks: proposal.blocks });
+    expect((await api('GET', '/api/state')).body.events).toHaveLength(1);
+    await api('PATCH', `/api/tasks/${task.id}`, { status: 'waiting', waitingOn: 'Alex' });
+    const state = (await api('GET', '/api/state')).body;
+    expect(state.events).toEqual([]);
+    expect(state.tasks[0]).toMatchObject({ status: 'waiting', waitingOn: 'Alex' });
+    expect(state.tasks[0].followUpAt).toBeTruthy();
+  });
+
+  it('books a Quick batch and removes it only when every task in it is finished', async () => {
+    const bar = (await api('POST', '/api/projects', { name: 'Bar', tag: 'bar' })).body;
+    const ids: string[] = [];
+    for (const title of ['Order limes', 'Order mix', 'Call rep']) {
+      ids.push((await api('POST', '/api/tasks', { title, estimateMin: 15, projectId: bar.id })).body.id);
+    }
+    const proposal = (await api('POST', '/api/schedule/propose')).body;
+    expect(proposal.blocks).toHaveLength(1);
+    expect(proposal.blocks[0]).toMatchObject({ title: 'Quick: 3 tasks', projectId: bar.id });
+
+    const [batch] = (await api('POST', '/api/schedule/apply', { blocks: proposal.blocks })).body;
+    expect(batch).toMatchObject({ title: 'Quick: 3 tasks', taskId: null, projectId: bar.id });
+    expect(batch.taskIds.sort()).toEqual([...ids].sort());
+    expect((await api('POST', '/api/schedule/propose')).body.blocks).toEqual([]);
+
+    await api('PATCH', `/api/tasks/${ids[0]}`, { status: 'done' });
+    await api('DELETE', `/api/tasks/${ids[1]}`);
+    let events = (await api('GET', '/api/state')).body.events;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ title: 'Quick: 2 tasks' });
+    expect(events[0].taskIds.sort()).toEqual([ids[0], ids[2]].sort());
+
+    await api('PATCH', `/api/tasks/${ids[2]}`, { status: 'done' });
+    events = (await api('GET', '/api/state')).body.events;
+    expect(events).toEqual([]);
+  });
+
+  it('keeps checklists and colours blocks by their task\'s project', async () => {
+    const p = (await api('POST', '/api/projects', { name: 'Home', color: 'green' })).body;
+    const t = (await api('POST', '/api/tasks', { title: 'Paint', projectId: p.id, checklist: [{ id: 'a', text: 'Primer', done: false }] })).body;
+    expect(t.checklist).toEqual([{ id: 'a', text: 'Primer', done: false }]);
+    const block = (await api('POST', '/api/events', { title: 'Paint', startAt: inDays(1, 15), endAt: inDays(1, 16), taskId: t.id })).body;
+    expect(block.projectId).toBe(p.id);
+    const other = (await api('POST', '/api/projects', { name: 'Other' })).body;
+    await api('PATCH', `/api/tasks/${t.id}`, { projectId: other.id });
+    expect((await api('GET', '/api/state')).body.events[0].projectId).toBe(other.id);
+  });
+});
+
 describe('login', () => {
   it('locks the API behind the password when one is set', async () => {
     server.close();
@@ -224,7 +320,7 @@ describe('MCP server', () => {
 
     const agenda = await call(client, 'get_agenda');
     expect(agenda.timezone).toBe('America/New_York');
-    expect(agenda.openTasks[0]).toMatchObject({ id: task.id, unscheduledMin: 0 });
+    expect(agenda.openTasksByProject[0].tasks[0]).toMatchObject({ id: task.id, unscheduledMin: 0 });
 
     await call(client, 'update_task', { id: task.id, status: 'done' });
     expect(await call(client, 'list_tasks')).toEqual([]);
@@ -233,6 +329,32 @@ describe('MCP server', () => {
     expect(await call(client, 'delete_event', { id: 'missing' })).toEqual({ error: 'No event with id missing' });
     // The web app sees what the agent did.
     expect((await api('GET', '/api/state')).body.tasks[0].status).toBe('done');
+  });
+
+  it('works with projects, checklists and waiting-on by name', async () => {
+    const client = await connectClient();
+    const project = await call(client, 'create_project', { name: 'Side work', emoji: '💼', color: 'indigo' });
+    expect(project).toMatchObject({ tag: 'side-work', color: 'indigo' });
+
+    const task = await call(client, 'create_task', { title: 'Send proposal', project: '#side-work', checklist: ['Draft', 'Price it', 'Send'] });
+    expect(task.projectId).toBe(project.id);
+    expect(task.checklist.map((c: any) => c.text)).toEqual(['Draft', 'Price it', 'Send']);
+    const checked = await call(client, 'check_item', { id: task.id, item: 'price' });
+    expect(checked.checklist.map((c: any) => c.done)).toEqual([false, true, false]);
+
+    const ask = await call(client, 'create_task', { title: 'Confirm the invoice', waitingOn: 'Sam', project: 'Side work' });
+    expect(ask).toMatchObject({ status: 'waiting', waitingOn: 'Sam' });
+    expect(ask.followUpAt).toBeTruthy();
+    expect((await call(client, 'list_waiting')).waiting.map((t: any) => t.id)).toEqual([ask.id]);
+
+    const overview = await call(client, 'get_project', { project: 'side' });
+    expect(overview.open.map((t: any) => t.id)).toEqual([task.id]);
+    expect(overview.waiting.map((t: any) => t.id)).toEqual([ask.id]);
+    expect((await call(client, 'get_project', { project: '#nope' })).error).toMatch(/No project matches/);
+
+    const week = await call(client, 'plan_week');
+    expect(week.byProject[0]).toMatchObject({ project: '💼 Side work (#side-work)', blocks: 1 });
+    expect((await call(client, 'weekly_review')).waiting).toBe(1);
   });
 
   it('requires the bearer token when one is configured', async () => {

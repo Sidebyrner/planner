@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CalEvent, ProposedBlock, Settings } from '../shared/types';
+import { projectStyle, type ProjectMap } from './projects';
 import { addDays, DAY_MS, fmtTime, fmtWeekday, sameDay } from './util';
 
 const HOUR_H = 52;
@@ -69,6 +70,7 @@ interface Props {
   events: CalEvent[];
   proposals: ProposedBlock[];
   settings: Settings;
+  projects: ProjectMap;
   litTaskId: string | null;
   onHoverTask: (id: string | null) => void;
   onOpenEvent: (e: CalEvent) => void;
@@ -210,8 +212,14 @@ export function Calendar(props: Props) {
                   const range = `${fmtTime(it.startsAt)} to ${fmtTime(it.endsAt)}`;
                   if (it.proposal) {
                     const p = it.proposal;
+                    const pProject = p.projectId ? props.projects.get(p.projectId) : undefined;
                     return (
-                      <div key={it.key} className={`block is-proposed${p.late ? ' is-late' : ''}${short ? ' is-short' : ''}`} style={style}>
+                      <div
+                        key={it.key}
+                        className={`block is-proposed${p.late ? ' is-late' : ''}${short ? ' is-short' : ''}${pProject ? ' has-project' : ''}`}
+                        style={{ ...style, ...projectStyle(pProject) }}
+                        title={p.outsideWindow ? `${p.title}: outside ${pProject?.name ?? 'the project'}'s hours, which were full` : undefined}
+                      >
                         <span className="block-title">{p.title}</span>
                         {!short && <span className="block-time">{p.late ? `${range}, after it is due` : range}</span>}
                         <button className="block-x" aria-label={`Drop the proposed block for ${p.title}`} onClick={() => props.onDropProposal(p)}>
@@ -222,11 +230,14 @@ export function Calendar(props: Props) {
                   }
                   const e = it.event!;
                   const minutes = Math.round((Date.parse(e.endAt) - Date.parse(e.startAt)) / 60_000);
+                  const isTask = !!e.taskId || e.taskIds.length > 0;
+                  const eProject = e.projectId ? props.projects.get(e.projectId) : undefined;
+                  const lit = !!props.litTaskId && (e.taskId === props.litTaskId || e.taskIds.includes(props.litTaskId));
                   return (
                     <button
                       key={it.key}
-                      className={`block ${e.taskId ? 'is-task' : 'is-event'}${short ? ' is-short' : ''}${e.taskId && e.taskId === props.litTaskId ? ' is-lit' : ''}`}
-                      style={style}
+                      className={`block ${isTask ? 'is-task' : 'is-event'}${short ? ' is-short' : ''}${lit ? ' is-lit' : ''}${eProject ? ' has-project' : ''}`}
+                      style={{ ...style, ...projectStyle(eProject) }}
                       draggable={e.source !== 'device'}
                       title={`${e.title}, ${range}`}
                       onDragStart={(ev) => {
@@ -239,8 +250,8 @@ export function Calendar(props: Props) {
                         drag.current = null;
                         setDropAt(null);
                       }}
-                      onMouseEnter={() => e.taskId && props.onHoverTask(e.taskId)}
-                      onMouseLeave={() => e.taskId && props.onHoverTask(null)}
+                      onMouseEnter={() => isTask && props.onHoverTask(e.taskId ?? e.taskIds[0])}
+                      onMouseLeave={() => isTask && props.onHoverTask(null)}
                       onClick={() => props.onOpenEvent(e)}
                     >
                       <span className="block-title">{e.title}</span>

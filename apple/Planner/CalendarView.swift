@@ -1,12 +1,13 @@
 import PlannerKit
 import SwiftUI
 
-/// Week grid on the Mac, one day at a time on the iPhone. Proposed blocks are dashed.
+/// Week grid on the Mac, one day at a time on the iPhone. Proposed blocks are dashed;
+/// everything Planner owns is coloured by project. On the Mac, drag a Planner block to move it.
 struct CalendarView: View {
     @Environment(AppModel.self) private var model
     @State private var anchor = Date()
     @State private var selectedProposal: ProposedBlock?
-    @State private var selectedBlock: CalEvent?
+    @State private var selectedEvent: CalEvent?
     @State private var planning = false
 
     #if os(macOS)
@@ -49,8 +50,10 @@ struct CalendarView: View {
                 events: model.state?.events ?? [],
                 proposed: model.proposal?.blocks ?? [],
                 scrollToHour: scrollHour,
+                project: { model.project(id: $0) },
                 onTapProposed: { selectedProposal = $0 },
-                onTapEvent: { if $0.source == .local { selectedBlock = $0 } }
+                onTapEvent: { selectedEvent = $0 },
+                onMove: { event, start in Task { await model.move(event, to: start) } }
             )
         }
         .navigationTitle(title)
@@ -85,17 +88,16 @@ struct CalendarView: View {
             Button("Book") { Task { await model.book([block]) } }
             Button("Discard", role: .destructive) { model.discard(block) }
         } message: { block in
-            if block.late { Text("This block ends after the task is due.") }
+            let names = (block.taskIds ?? []).compactMap { model.task(id: $0)?.title }
+            let notes = [
+                names.isEmpty ? nil : names.joined(separator: ", "),
+                block.late ? "This block ends after the task is due." : nil,
+                block.outsideWindow == true ? "The project's own hours were full, so this uses working hours." : nil,
+            ].compactMap { $0 }
+            if !notes.isEmpty { Text(notes.joined(separator: "\n")) }
         }
-        .confirmationDialog(
-            selectedBlock.map { "\($0.title), \(Format.dayTime($0.startAt))–\(Format.time($0.endAt))" } ?? "",
-            isPresented: Binding(get: { selectedBlock != nil }, set: { if !$0 { selectedBlock = nil } }),
-            titleVisibility: .visible,
-            presenting: selectedBlock
-        ) { block in
-            Button(block.isTaskBlock ? "Remove Block" : "Delete Event", role: .destructive) { Task { await model.removeBlock(block) } }
-        } message: { _ in
-            Text("To move it, drag it in Apple Calendar's Planner calendar.")
+        .sheet(item: $selectedEvent) { event in
+            EventDetailView(event: event)
         }
     }
 
@@ -134,6 +136,71 @@ struct ProposalBar: View {
     }
 }
 
+/// Details for any event: what it is, its project, the tasks in a Quick block, and what you can do with it.
+struct EventDetailView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let event: CalEvent
+    @State private var openTask: PlannerTask?
+
+    var body: some View {
+        let project = model.project(id: event.projectId)
+        let tasks = model.tasks(for: event)
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("When", value: event.allDay ? Format.relative(event.startAt) : "\(Format.dayTime(event.startAt))–\(Format.time(event.endAt))")
+                    if let project { LabeledContent("Project") { ProjectChip(project: project) } }
+                    LabeledContent("From", value: source)
+                }
+                if !tasks.isEmpty {
+                    Section(event.isBatch ? "Tasks in this block" : "Task") {
+                        ForEach(tasks) { task in
+                            TaskRow(task: task, nextBlock: nil, showProject: false, onOpen: { openTask = task })
+                        }
+                    }
+                }
+                if !event.notes.isEmpty {
+                    Section("Notes") { Text(event.notes) }
+                }
+                if event.source == .local {
+                    Section {
+                        Button(event.isTaskBlock ? "Remove Block" : "Delete Event", role: .destructive) {
+                            Task {
+                                await model.removeBlock(event)
+                                dismiss()
+                            }
+                        }
+                    } footer: {
+                        #if os(macOS)
+                        Text("Drag it on the grid, or in Apple Calendar's Planner calendar, to move it.")
+                        #else
+                        Text("To move it, drag it in Apple Calendar's Planner calendar.")
+                        #endif
+                    }
+                }
+            }
+            .formStyle(.grouped)
+            .navigationTitle(event.title)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+            .sheet(item: $openTask) { TaskDetailView(task: $0) }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 360)
+        #endif
+    }
+
+    private var source: String {
+        switch event.source {
+        case .local: event.isTaskBlock ? "Planner (task block)" : "Planner"
+        case .device: "Your calendars (read-only here)"
+        case .google: "Google Calendar"
+        }
+    }
+}
+
 // MARK: - Grid
 
 private struct GridItemModel: Identifiable {
@@ -162,8 +229,10 @@ struct ScheduleGrid: View {
     let events: [CalEvent]
     let proposed: [ProposedBlock]
     let scrollToHour: Int
+    var project: (String?) -> Project? = { _ in nil }
     var onTapProposed: (ProposedBlock) -> Void
     var onTapEvent: (CalEvent) -> Void
+    var onMove: (CalEvent, Date) -> Void = { _, _ in }
 
     private let hourHeight: CGFloat = 52
     private let gutter: CGFloat = 52
@@ -177,13 +246,20 @@ struct ScheduleGrid: View {
                 ScrollView {
                     HStack(alignment: .top, spacing: 0) {
                         hourLabels
-                        ForEach(days, id: \.self) { day in
+                        ForEach(Array(days.enumerated()), id: \.element) { index, day in
                             DayColumn(
                                 day: day,
                                 items: items(on: day),
                                 hourHeight: hourHeight,
+                                project: project,
                                 onTapProposed: onTapProposed,
-                                onTapEvent: onTapEvent
+                                onTapEvent: onTapEvent,
+                                onDrop: { event, dayOffset, minutes in
+                                    let target = Calendar.current.date(byAdding: .day, value: dayOffset, to: event.startAt) ?? event.startAt
+                                    onMove(event, target.addingTimeInterval(Double(minutes) * 60))
+                                },
+                                columnIndex: index,
+                                columnCount: days.count
                             )
                             if day != days.last { Divider() }
                         }
@@ -230,7 +306,8 @@ struct ScheduleGrid: View {
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 4)
-                                .background(.gray.opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+                                .background((project(event.projectId)?.color.color ?? .gray).opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+                                .onTapGesture { onTapEvent(event) }
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -311,8 +388,15 @@ private struct DayColumn: View {
     let day: Date
     let items: [PlacedItem]
     let hourHeight: CGFloat
+    let project: (String?) -> Project?
     var onTapProposed: (ProposedBlock) -> Void
     var onTapEvent: (CalEvent) -> Void
+    /// (event, days moved, minutes moved within the day)
+    var onDrop: (CalEvent, Int, Int) -> Void
+    let columnIndex: Int
+    let columnCount: Int
+
+    @State private var dragging: (id: String, offset: CGSize)?
 
     var body: some View {
         GeometryReader { geo in
@@ -328,13 +412,16 @@ private struct DayColumn: View {
                 if Calendar.current.isDateInToday(day) { nowLine }
                 ForEach(items) { placed in
                     let width = (geo.size.width - 4) / CGFloat(placed.lanes)
-                    block(placed.item)
+                    let offset = dragging?.id == placed.id ? dragging!.offset : .zero
+                    block(placed.item, columnWidth: geo.size.width)
                         .frame(width: max(width - 2, 0), height: max(height(placed.item), 18))
-                        .offset(x: 2 + CGFloat(placed.lane) * width, y: y(placed.item.start))
+                        .offset(x: 2 + CGFloat(placed.lane) * width + offset.width, y: y(placed.item.start) + offset.height)
+                        .zIndex(dragging?.id == placed.id ? 1 : 0)
                 }
             }
         }
         .frame(maxWidth: .infinity)
+        .zIndex(dragging != nil ? 1 : 0)
     }
 
     private var nowLine: some View {
@@ -352,28 +439,60 @@ private struct DayColumn: View {
         CGFloat(item.end.timeIntervalSince(item.start) / 3600) * hourHeight
     }
 
+    /// Whole days and 15-minute steps a drag of `translation` amounts to.
+    private func snapped(_ translation: CGSize, columnWidth: CGFloat) -> (days: Int, minutes: Int) {
+        let days = columnWidth > 0 ? Int((translation.width / columnWidth).rounded()) : 0
+        let clampedDays = min(max(days, -columnIndex), columnCount - 1 - columnIndex)
+        let minutes = Int((translation.height / hourHeight * 60 / 15).rounded()) * 15
+        return (clampedDays, minutes)
+    }
+
     @ViewBuilder
-    private func block(_ item: GridItemModel) -> some View {
+    private func block(_ item: GridItemModel, columnWidth: CGFloat) -> some View {
         switch item.kind {
         case .proposed(let p):
-            label(p.title, start: p.startAt, end: p.endAt, caption: p.late ? "Proposed · late" : "Proposed")
-                .background((p.late ? Color.orange : Color.accentColor).opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+            let tint = project(p.projectId).tint
+            label(p.title, start: p.startAt, end: p.endAt, caption: p.late ? "Proposed · late" : p.outsideWindow == true ? "Proposed · outside its hours" : "Proposed")
+                .background((p.late ? Color.orange : tint).opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(p.late ? Color.orange : Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
+                        .strokeBorder(p.late ? Color.orange : tint, style: StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
                 )
                 .contentShape(Rectangle())
                 .onTapGesture { onTapProposed(p) }
                 .accessibilityAddTraits(.isButton)
         case .event(let e):
-            let tint: Color = e.isTaskBlock ? .accentColor : (e.source == .device ? .gray : .purple)
-            label(e.title, start: e.startAt, end: e.endAt, caption: e.isTaskBlock ? "Task block" : nil)
+            let proj = project(e.projectId)
+            let tint: Color = e.isTaskBlock ? proj.tint : (proj?.color.color ?? (e.source == .device ? .gray : .purple))
+            let view = label(e.title, start: e.startAt, end: e.endAt, caption: e.isBatch ? "Quick block" : e.isTaskBlock ? proj?.label ?? "Task block" : nil)
                 .background(tint.opacity(e.isTaskBlock ? 0.28 : 0.16), in: RoundedRectangle(cornerRadius: 6))
                 .overlay(alignment: .leading) {
                     Rectangle().fill(tint).frame(width: 3).clipShape(RoundedRectangle(cornerRadius: 1.5))
                 }
                 .contentShape(Rectangle())
                 .onTapGesture { onTapEvent(e) }
+                .accessibilityAddTraits(.isButton)
+            #if os(macOS)
+            if e.source == .local && !e.allDay {
+                view.gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            let s = snapped(value.translation, columnWidth: columnWidth)
+                            dragging = ("e:\(e.id)", CGSize(width: CGFloat(s.days) * columnWidth, height: CGFloat(s.minutes) / 60 * hourHeight))
+                        }
+                        .onEnded { value in
+                            let s = snapped(value.translation, columnWidth: columnWidth)
+                            dragging = nil
+                            if s.days != 0 || s.minutes != 0 { onDrop(e, s.days, s.minutes) }
+                        }
+                )
+                .help("Drag to move")
+            } else {
+                view
+            }
+            #else
+            view
+            #endif
         }
     }
 

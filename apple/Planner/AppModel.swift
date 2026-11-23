@@ -11,6 +11,15 @@ final class AppModel {
         static let busyCalendars = "busyCalendarIDs"
         static let tokenAccount = "deviceToken"
         static let calendarBridge = "isCalendarBridge"
+        static let reminders = "remindersEnabled"
+    }
+
+    /// Local notifications at block start and follow-up time.
+    var remindersEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(remindersEnabled, forKey: Keys.reminders)
+            Task { await refreshReminders(requestPermission: remindersEnabled) }
+        }
     }
 
     /// The Mac is the bridge by default; the iPhone uses the server only.
@@ -85,6 +94,7 @@ final class AppModel {
         self.token = Keychain.read(account: Keys.tokenAccount) ?? ""
         self.busyCalendarIDs = (UserDefaults.standard.array(forKey: Keys.busyCalendars) as? [String]).map(Set.init)
         self.isCalendarBridge = UserDefaults.standard.object(forKey: Keys.calendarBridge) as? Bool ?? Self.bridgeByDefault
+        self.remindersEnabled = UserDefaults.standard.bool(forKey: Keys.reminders)
         rebuildEngine()
         state = self.cache.loadState()
         refreshCalendarInfo()
@@ -133,6 +143,7 @@ final class AppModel {
             if let state = report.state { self.state = state }
             rejectedMoves = report.rejected
             lastSyncAt = Date()
+            await refreshReminders(requestPermission: false)
             syncError = nil
         } catch {
             syncError = error.localizedDescription
@@ -274,5 +285,94 @@ final class AppModel {
     func task(id: String?) -> PlannerTask? {
         guard let id else { return nil }
         return state?.tasks.first { $0.id == id }
+    }
+
+    // MARK: Projects
+
+    var projects: [Project] { (state?.projects ?? []).sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) } }
+    var liveProjects: [Project] { projects.filter { !$0.archived } }
+
+    func project(id: String?) -> Project? {
+        guard let id else { return nil }
+        return state?.projects.first { $0.id == id }
+    }
+
+    @discardableResult
+    func saveProject(id: String?, _ patch: ProjectPatch) async -> Bool {
+        await perform { api in
+            if let id { _ = try await api.updateProject(id: id, patch) } else { _ = try await api.createProject(patch) }
+        }
+    }
+
+    func removeProject(_ project: Project) async {
+        await perform { _ = try await $0.removeProject(id: project.id) }
+    }
+
+    // MARK: Task edits
+
+    @discardableResult
+    func update(_ task: PlannerTask, _ patch: TaskPatch) async -> Bool {
+        await perform { _ = try await $0.updateTask(id: task.id, patch) }
+    }
+
+    func toggleStep(_ item: ChecklistItem, of task: PlannerTask) async {
+        let checklist = task.checklist.map { $0.id == item.id ? ChecklistItem(id: $0.id, text: $0.text, done: !$0.done) : $0 }
+        await update(task, TaskPatch(checklist: checklist))
+    }
+
+    /// Move a Planner event or block to a new start, keeping its length.
+    func move(_ event: CalEvent, to start: Date) async {
+        guard !event.isReadOnly else { return }
+        let length = event.endAt.timeIntervalSince(event.startAt)
+        await perform { _ = try await $0.updateEvent(id: event.id, EventPatch(startAt: start, endAt: start.addingTimeInterval(length))) }
+    }
+
+    var waitingTasks: [PlannerTask] {
+        (state?.tasks ?? []).filter(\.isWaiting).sorted { ($0.followUpAt ?? .distantFuture) < ($1.followUpAt ?? .distantFuture) }
+    }
+
+    func tasks(for event: CalEvent) -> [PlannerTask] {
+        event.allTaskIds.compactMap { task(id: $0) }
+    }
+
+    // MARK: Today
+
+    /// Today's timed events and blocks, in order.
+    var todayEvents: [CalEvent] {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: Date())
+        let end = calendar.date(byAdding: .day, value: 1, to: start) ?? start
+        return (state?.events ?? []).filter { !$0.allDay && $0.startAt < end && $0.endAt > start }.sorted { $0.startAt < $1.startAt }
+    }
+
+    var currentEvent: CalEvent? {
+        let now = Date()
+        return todayEvents.last { $0.startAt <= now && $0.endAt > now }
+    }
+
+    var nextEvent: CalEvent? {
+        let now = Date()
+        return todayEvents.first { $0.startAt > now } ?? (state?.events ?? []).filter { !$0.allDay && $0.startAt > now }.min { $0.startAt < $1.startAt }
+    }
+
+    var dueToday: [PlannerTask] {
+        let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+        return openTasks.filter { ($0.dueAt ?? .distantFuture) < end }
+    }
+
+    var followUpsDue: [PlannerTask] { openTasks.filter { $0.waitingOn != nil } }
+
+    // MARK: Reminders
+
+    func refreshReminders(requestPermission: Bool) async {
+        guard remindersEnabled, let state else {
+            await Reminders.clear()
+            return
+        }
+        if requestPermission, !(await Reminders.requestPermission()) {
+            actionError = "Notifications are turned off for Planner. Allow them in System Settings to get reminders."
+            return
+        }
+        await Reminders.schedule(events: state.events, tasks: state.tasks, projects: state.projects)
     }
 }

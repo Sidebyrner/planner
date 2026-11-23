@@ -3,7 +3,29 @@ import Foundation
 // Mirrors src/shared/types.ts. Keep the two in step.
 
 public enum TaskStatus: String, Codable, Sendable, CaseIterable {
-    case todo, done
+    /// Open and schedulable.
+    case todo
+    /// On someone else; never scheduled, comes back to todo at followUpAt.
+    case waiting
+    case done
+
+    /// A status this build doesn't know reads as todo rather than failing the whole state.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TaskStatus(rawValue: raw) ?? .todo
+    }
+}
+
+public struct ChecklistItem: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var text: String
+    public var done: Bool
+
+    public init(id: String = UUID().uuidString, text: String, done: Bool = false) {
+        self.id = id
+        self.text = text
+        self.done = done
+    }
 }
 
 /// A task. Named `PlannerTask` because `Task` is Swift's concurrency type.
@@ -18,8 +40,82 @@ public struct PlannerTask: Codable, Identifiable, Hashable, Sendable {
     public var dueAt: Date?
     public var createdAt: Date
     public var completedAt: Date?
+    public var projectId: String? = nil
+    public var checklist: [ChecklistItem] = []
+    /// Who it's waiting on; still set after a follow-up comes back to todo.
+    public var waitingOn: String? = nil
+    public var followUpAt: Date? = nil
 
     public var isDone: Bool { status == .done }
+    public var isWaiting: Bool { status == .waiting }
+    public var checklistProgress: String? {
+        checklist.isEmpty ? nil : "\(checklist.filter(\.done).count)/\(checklist.count)"
+    }
+}
+
+extension PlannerTask {
+    private enum CodingKeys: String, CodingKey {
+        case id, title, notes, status, priority, estimateMin, dueAt, createdAt, completedAt, projectId, checklist, waitingOn, followUpAt
+    }
+
+    /// Fields added later are optional, so a cache or server from before them still decodes.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        status = try c.decode(TaskStatus.self, forKey: .status)
+        priority = try c.decode(Int.self, forKey: .priority)
+        estimateMin = try c.decode(Int.self, forKey: .estimateMin)
+        dueAt = try c.decodeIfPresent(Date.self, forKey: .dueAt)
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+        completedAt = try c.decodeIfPresent(Date.self, forKey: .completedAt)
+        projectId = try c.decodeIfPresent(String.self, forKey: .projectId)
+        checklist = try c.decodeIfPresent([ChecklistItem].self, forKey: .checklist) ?? []
+        waitingOn = try c.decodeIfPresent(String.self, forKey: .waitingOn)
+        followUpAt = try c.decodeIfPresent(Date.self, forKey: .followUpAt)
+    }
+}
+
+public enum ProjectColor: String, Codable, Sendable, CaseIterable {
+    case amber, teal, indigo, rose, green, violet, orange, slate
+
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ProjectColor(rawValue: raw) ?? .slate
+    }
+}
+
+/// A weekly window, e.g. weekdays 06:45–08:15, in the user's timezone.
+public struct TimeWindow: Codable, Hashable, Sendable {
+    /// ISO weekdays, 1 = Monday … 7 = Sunday
+    public var days: [Int]
+    public var start: String
+    public var end: String
+
+    public init(days: [Int], start: String, end: String) {
+        self.days = days
+        self.start = start
+        self.end = end
+    }
+}
+
+public struct Project: Codable, Identifiable, Hashable, Sendable {
+    public var id: String
+    public var name: String
+    /// Used as #tag in capture.
+    public var tag: String
+    public var color: ProjectColor
+    public var emoji: String
+    public var archived: Bool
+    public var sortOrder: Int
+    /// When its tasks may be scheduled. Empty = working hours.
+    public var windows: [TimeWindow]
+    public var windowStrict: Bool
+    /// Calendar events whose title contains this become time for this project.
+    public var hostMatch: String?
+
+    public var label: String { emoji.isEmpty ? name : "\(emoji) \(name)" }
 }
 
 public enum EventSource: String, Codable, Sendable {
@@ -43,9 +139,39 @@ public struct CalEvent: Codable, Identifiable, Hashable, Sendable {
     public var googleId: String?
     public var externalId: String?
     public var source: EventSource
+    /// Its own project, or its task's project for task blocks.
+    public var projectId: String? = nil
+    /// Tasks sharing a Quick block. Empty otherwise.
+    public var taskIds: [String] = []
 
-    public var isTaskBlock: Bool { taskId != nil }
+    /// A block reserved for one task, or a Quick block for several.
+    public var isTaskBlock: Bool { taskId != nil || !taskIds.isEmpty }
+    public var isBatch: Bool { !taskIds.isEmpty }
     public var isReadOnly: Bool { source == .device }
+    /// Every task this block is for.
+    public var allTaskIds: [String] { taskId.map { [$0] } ?? taskIds }
+}
+
+extension CalEvent {
+    private enum CodingKeys: String, CodingKey {
+        case id, title, notes, startAt, endAt, allDay, taskId, googleId, externalId, source, projectId, taskIds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        notes = try c.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        startAt = try c.decode(Date.self, forKey: .startAt)
+        endAt = try c.decode(Date.self, forKey: .endAt)
+        allDay = try c.decodeIfPresent(Bool.self, forKey: .allDay) ?? false
+        taskId = try c.decodeIfPresent(String.self, forKey: .taskId)
+        googleId = try c.decodeIfPresent(String.self, forKey: .googleId)
+        externalId = try c.decodeIfPresent(String.self, forKey: .externalId)
+        source = try c.decode(EventSource.self, forKey: .source)
+        projectId = try c.decodeIfPresent(String.self, forKey: .projectId)
+        taskIds = try c.decodeIfPresent([String].self, forKey: .taskIds) ?? []
+    }
 }
 
 public struct Settings: Codable, Hashable, Sendable {
@@ -60,17 +186,46 @@ public struct Settings: Codable, Hashable, Sendable {
     public var workDays: [Int]
     public var maxBlockMin: Int
     public var horizonDays: Int
+    /// Minutes kept free around long fixed events. 0 = off.
+    public var bufferMin: Int = 0
+    public var bufferMinEventMin: Int = 120
+}
+
+extension Settings {
+    private enum CodingKeys: String, CodingKey {
+        case timezone, timezoneConfirmed, workStart, workEnd, workDays, maxBlockMin, horizonDays, bufferMin, bufferMinEventMin
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        timezone = try c.decode(String.self, forKey: .timezone)
+        timezoneConfirmed = try c.decodeIfPresent(Bool.self, forKey: .timezoneConfirmed) ?? false
+        workStart = try c.decode(String.self, forKey: .workStart)
+        workEnd = try c.decode(String.self, forKey: .workEnd)
+        workDays = try c.decode([Int].self, forKey: .workDays)
+        maxBlockMin = try c.decode(Int.self, forKey: .maxBlockMin)
+        horizonDays = try c.decode(Int.self, forKey: .horizonDays)
+        bufferMin = try c.decodeIfPresent(Int.self, forKey: .bufferMin) ?? 0
+        bufferMinEventMin = try c.decodeIfPresent(Int.self, forKey: .bufferMinEventMin) ?? 120
+    }
 }
 
 public struct ProposedBlock: Codable, Identifiable, Hashable, Sendable {
+    /// The task, or the first task of a Quick batch.
     public var taskId: String
     public var title: String
     public var startAt: Date
     public var endAt: Date
     /// True when the block ends after the task's due time.
     public var late: Bool
+    /// Every task in a Quick batch; nil for a single task.
+    public var taskIds: [String]? = nil
+    public var projectId: String? = nil
+    /// The project's own hours were full, so working hours were used.
+    public var outsideWindow: Bool? = nil
 
     public var id: String { "\(taskId)@\(PlannerJSON.format(startAt))" }
+    public var isBatch: Bool { (taskIds?.count ?? 0) > 1 }
 }
 
 public struct ScheduleProposal: Codable, Hashable, Sendable {
@@ -101,12 +256,21 @@ public struct Captured: Codable, Hashable, Sendable {
     public var dueAt: Date?
     public var startAt: Date?
     public var endAt: Date?
+    /// The #tag as typed.
+    public var projectTag: String? = nil
+    public var projectId: String? = nil
+    /// The tag matched no project; one is created on save.
+    public var newProject: String? = nil
+    /// "@Sam …" makes a waiting-on task.
+    public var waitingOn: String? = nil
+    public var followUpAt: Date? = nil
 }
 
 public struct CaptureResult: Codable, Hashable, Sendable {
     public var parsed: Captured
     public var task: PlannerTask?
     public var event: CalEvent?
+    public var project: Project?
 }
 
 public struct GoogleStatus: Codable, Hashable, Sendable {
@@ -121,6 +285,20 @@ public struct AppState: Codable, Hashable, Sendable {
     public var events: [CalEvent]
     public var settings: Settings
     public var google: GoogleStatus
+    public var projects: [Project] = []
+}
+
+extension AppState {
+    private enum CodingKeys: String, CodingKey { case tasks, events, settings, google, projects }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        tasks = try c.decode([PlannerTask].self, forKey: .tasks)
+        events = try c.decode([CalEvent].self, forKey: .events)
+        settings = try c.decode(Settings.self, forKey: .settings)
+        google = try c.decode(GoogleStatus.self, forKey: .google)
+        projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? []
+    }
 }
 
 // MARK: - Request bodies
@@ -131,17 +309,19 @@ public struct TaskDraft: Encodable, Hashable, Sendable {
     public var priority: Int?
     public var estimateMin: Int?
     public var dueAt: Date?
+    public var projectId: String?
 
-    public init(title: String, notes: String? = nil, priority: Int? = nil, estimateMin: Int? = nil, dueAt: Date? = nil) {
+    public init(title: String, notes: String? = nil, priority: Int? = nil, estimateMin: Int? = nil, dueAt: Date? = nil, projectId: String? = nil) {
         self.title = title
         self.notes = notes
         self.priority = priority
         self.estimateMin = estimateMin
         self.dueAt = dueAt
+        self.projectId = projectId
     }
 }
 
-/// Only the fields that are set are sent. `dueAt: .some(nil)` clears the due date.
+/// Only the fields that are set are sent. A double optional set to `.some(nil)` clears that field.
 public struct TaskPatch: Encodable, Hashable, Sendable {
     public var title: String?
     public var notes: String?
@@ -149,17 +329,30 @@ public struct TaskPatch: Encodable, Hashable, Sendable {
     public var priority: Int?
     public var estimateMin: Int?
     public var dueAt: Date??
+    public var projectId: String??
+    public var checklist: [ChecklistItem]?
+    public var waitingOn: String??
+    public var followUpAt: Date??
 
-    public init(title: String? = nil, notes: String? = nil, status: TaskStatus? = nil, priority: Int? = nil, estimateMin: Int? = nil, dueAt: Date?? = nil) {
+    public init(
+        title: String? = nil, notes: String? = nil, status: TaskStatus? = nil, priority: Int? = nil, estimateMin: Int? = nil,
+        dueAt: Date?? = nil, projectId: String?? = nil, checklist: [ChecklistItem]? = nil, waitingOn: String?? = nil, followUpAt: Date?? = nil
+    ) {
         self.title = title
         self.notes = notes
         self.status = status
         self.priority = priority
         self.estimateMin = estimateMin
         self.dueAt = dueAt
+        self.projectId = projectId
+        self.checklist = checklist
+        self.waitingOn = waitingOn
+        self.followUpAt = followUpAt
     }
 
-    private enum CodingKeys: String, CodingKey { case title, notes, status, priority, estimateMin, dueAt }
+    private enum CodingKeys: String, CodingKey {
+        case title, notes, status, priority, estimateMin, dueAt, projectId, checklist, waitingOn, followUpAt
+    }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -168,10 +361,62 @@ public struct TaskPatch: Encodable, Hashable, Sendable {
         try c.encodeIfPresent(status, forKey: .status)
         try c.encodeIfPresent(priority, forKey: .priority)
         try c.encodeIfPresent(estimateMin, forKey: .estimateMin)
-        switch dueAt {
+        try c.encodeIfPresent(checklist, forKey: .checklist)
+        try Self.encode(dueAt, .dueAt, &c)
+        try Self.encode(projectId, .projectId, &c)
+        try Self.encode(waitingOn, .waitingOn, &c)
+        try Self.encode(followUpAt, .followUpAt, &c)
+    }
+
+    private static func encode<T: Encodable>(_ value: T??, _ key: CodingKeys, _ c: inout KeyedEncodingContainer<CodingKeys>) throws {
+        switch value {
         case .none: break
-        case .some(.none): try c.encodeNil(forKey: .dueAt)
-        case .some(.some(let date)): try c.encode(date, forKey: .dueAt)
+        case .some(.none): try c.encodeNil(forKey: key)
+        case .some(.some(let v)): try c.encode(v, forKey: key)
+        }
+    }
+}
+
+/// Fields for creating or changing a project. Only set fields are sent.
+public struct ProjectPatch: Encodable, Hashable, Sendable {
+    public var name: String?
+    public var tag: String?
+    public var color: ProjectColor?
+    public var emoji: String?
+    public var archived: Bool?
+    public var windows: [TimeWindow]?
+    public var windowStrict: Bool?
+    public var hostMatch: String??
+
+    public init(
+        name: String? = nil, tag: String? = nil, color: ProjectColor? = nil, emoji: String? = nil, archived: Bool? = nil,
+        windows: [TimeWindow]? = nil, windowStrict: Bool? = nil, hostMatch: String?? = nil
+    ) {
+        self.name = name
+        self.tag = tag
+        self.color = color
+        self.emoji = emoji
+        self.archived = archived
+        self.windows = windows
+        self.windowStrict = windowStrict
+        self.hostMatch = hostMatch
+    }
+
+    private enum CodingKeys: String, CodingKey { case name, tag, color, emoji, archived, windows, windowStrict, hostMatch }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(name, forKey: .name)
+        try c.encodeIfPresent(tag, forKey: .tag)
+        try c.encodeIfPresent(color, forKey: .color)
+        try c.encodeIfPresent(emoji, forKey: .emoji)
+        try c.encodeIfPresent(archived, forKey: .archived)
+        try c.encodeIfPresent(windows, forKey: .windows)
+        try c.encodeIfPresent(windowStrict, forKey: .windowStrict)
+        switch hostMatch {
+        case .none: break
+        case .some(.none): try c.encodeNil(forKey: .hostMatch)
+        case .some(.some(let v)): try c.encode(v, forKey: .hostMatch)
         }
     }
 }
@@ -218,8 +463,13 @@ public struct SettingsPatch: Encodable, Hashable, Sendable {
     public var workDays: [Int]?
     public var maxBlockMin: Int?
     public var horizonDays: Int?
+    public var bufferMin: Int?
+    public var bufferMinEventMin: Int?
 
-    public init(timezone: String? = nil, timezoneConfirmed: Bool? = nil, workStart: String? = nil, workEnd: String? = nil, workDays: [Int]? = nil, maxBlockMin: Int? = nil, horizonDays: Int? = nil) {
+    public init(
+        timezone: String? = nil, timezoneConfirmed: Bool? = nil, workStart: String? = nil, workEnd: String? = nil, workDays: [Int]? = nil,
+        maxBlockMin: Int? = nil, horizonDays: Int? = nil, bufferMin: Int? = nil, bufferMinEventMin: Int? = nil
+    ) {
         self.timezone = timezone
         self.timezoneConfirmed = timezoneConfirmed
         self.workStart = workStart
@@ -227,23 +477,28 @@ public struct SettingsPatch: Encodable, Hashable, Sendable {
         self.workDays = workDays
         self.maxBlockMin = maxBlockMin
         self.horizonDays = horizonDays
+        self.bufferMin = bufferMin
+        self.bufferMinEventMin = bufferMinEventMin
     }
 }
 
 /// One block to book, from a `ProposedBlock` the user accepted.
 public struct BlockBooking: Encodable, Hashable, Sendable {
     public var taskId: String
+    /// Set for a Quick block shared by several short tasks.
+    public var taskIds: [String]?
     public var startAt: Date
     public var endAt: Date
 
-    public init(taskId: String, startAt: Date, endAt: Date) {
+    public init(taskId: String, taskIds: [String]? = nil, startAt: Date, endAt: Date) {
         self.taskId = taskId
+        self.taskIds = taskIds
         self.startAt = startAt
         self.endAt = endAt
     }
 
     public init(_ block: ProposedBlock) {
-        self.init(taskId: block.taskId, startAt: block.startAt, endAt: block.endAt)
+        self.init(taskId: block.taskId, taskIds: block.taskIds, startAt: block.startAt, endAt: block.endAt)
     }
 }
 

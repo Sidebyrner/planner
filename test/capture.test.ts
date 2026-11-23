@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseCapture } from '../src/server/capture.js';
+import type { Project } from '../src/shared/types.js';
 
 // Friday 2026-11-20, 10:00 in New York
 const opts = { now: new Date('2026-11-20T15:00:00Z'), timezone: 'America/New_York' };
@@ -30,7 +31,10 @@ describe('parseCapture', () => {
   });
 
   it('makes a plain line an undated task', () => {
-    expect(p('Buy limes')).toEqual({ kind: 'task', title: 'Buy limes', priority: 2, estimateMin: null, dueAt: null, startAt: null, endAt: null });
+    expect(p('Buy limes')).toEqual({
+      kind: 'task', title: 'Buy limes', priority: 2, estimateMin: null, dueAt: null, startAt: null, endAt: null,
+      projectTag: null, projectId: null, newProject: null, waitingOn: null, followUpAt: null,
+    });
   });
 
   it('uses a bare date as the due day', () => {
@@ -53,5 +57,34 @@ describe('parseCapture', () => {
 
   it('does not mistake numbers in a title for a duration', () => {
     expect(p('Order 3 kegs')).toMatchObject({ kind: 'task', title: 'Order 3 kegs', estimateMin: null });
+  });
+});
+
+describe('parseCapture tags and mentions', () => {
+  const projects: Project[] = [
+    { id: 'p1', name: 'Bar', tag: 'bar', color: 'amber', emoji: '', archived: false, sortOrder: 1, windows: [], windowStrict: false, hostMatch: null },
+    { id: 'p2', name: 'Freelance', tag: 'freelance', color: 'indigo', emoji: '', archived: false, sortOrder: 2, windows: [], windowStrict: false, hostMatch: null },
+  ];
+  const t = (text: string) => parseCapture(text, { ...opts, projects });
+
+  it('takes #tag anywhere in the line and leaves it out of the title', () => {
+    expect(t('Order kegs #bar 15m')).toMatchObject({ title: 'Order kegs', projectTag: 'bar', projectId: 'p1', estimateMin: 15 });
+    expect(t('#free Send proposal by Monday')).toMatchObject({ title: 'Send proposal', projectId: 'p2' });
+  });
+
+  it('marks an unknown tag as a new project', () => {
+    expect(t('Update CV #Career')).toMatchObject({ title: 'Update CV', projectId: null, newProject: 'career' });
+  });
+
+  it('tags events too', () => {
+    expect(t('Rep visit Monday 2pm #bar')).toMatchObject({ kind: 'event', title: 'Rep visit', projectId: 'p1' });
+  });
+
+  it('turns @Name into a waiting task with a follow-up date', () => {
+    expect(t('@Sam send the invoice Tuesday #freelance')).toMatchObject({
+      kind: 'task', title: 'send the invoice', waitingOn: 'Sam', projectId: 'p2', dueAt: null,
+      followUpAt: '2026-11-24T14:00:00.000Z', // Tuesday 09:00 New York
+    });
+    expect(t('Ask @Alex about the keys')).toMatchObject({ title: 'Ask about the keys', waitingOn: 'Alex', followUpAt: '2026-11-22T14:00:00.000Z' });
   });
 });

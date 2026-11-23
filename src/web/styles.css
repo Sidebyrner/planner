@@ -12,6 +12,25 @@
   --marigold-deep: #8a6400;
   --alert: #b93226;
   --alert-soft: #fbe9e6;
+  --header: #14213d;
+  --field: #ffffff;
+  /* Project palette: a strong edge colour and a soft fill for each. */
+  --p-amber: #c98a00;
+  --p-amber-soft: #fdf0c9;
+  --p-teal: #0f8a80;
+  --p-teal-soft: #d4f1ee;
+  --p-indigo: #4453c4;
+  --p-indigo-soft: #e1e5fb;
+  --p-rose: #c33b63;
+  --p-rose-soft: #fbe1e9;
+  --p-green: #2f8a3e;
+  --p-green-soft: #dcf2df;
+  --p-violet: #7a46c2;
+  --p-violet-soft: #ece2fa;
+  --p-orange: #d2611c;
+  --p-orange-soft: #fde5d5;
+  --p-slate: #5a6880;
+  --p-slate-soft: #e6eaf0;
   --gutter: 56px;
   --display: 'Bricolage Grotesque', 'Figtree', system-ui, sans-serif;
   font-family: 'Figtree', system-ui, -apple-system, 'Segoe UI', sans-serif;
@@ -131,11 +150,11 @@ textarea {
 
 .top {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
   align-items: start;
   gap: 12px;
   padding: 14px 20px 6px;
-  background: var(--ink);
+  background: var(--header);
   color: #fff;
 }
 
@@ -724,7 +743,7 @@ form label textarea,
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #fff;
+  background: var(--field);
   font-size: 15px;
   color: var(--ink);
 }
@@ -934,5 +953,276 @@ form footer {
   .row {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+
+  .top {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+}
+
+/* ---- projects */
+
+.proj-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--proj-soft);
+  color: var(--proj);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--proj, var(--muted));
+  flex: none;
+}
+
+.proj-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+
+.proj-filter button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.proj-filter button small {
+  color: var(--muted);
+}
+
+.proj-filter button.is-on {
+  border-color: var(--proj, var(--ink));
+  background: var(--proj-soft, var(--line-soft));
+  font-weight: 600;
+}
+
+.task.has-project {
+  box-shadow: inset 3px 0 0 var(--proj);
+}
+
+.is-followup {
+  color: var(--alert);
+  font-weight: 600;
+}
+
+.waiting summary,
+.done summary {
+  cursor: pointer;
+}
+
+.task.is-waiting .wait-icon {
+  width: 18px;
+  text-align: center;
+}
+
+/* Blocks take their project's colour; plain events keep the neutral look. */
+.block.is-task.has-project {
+  background: var(--proj-soft);
+  border-left: 4px solid var(--proj);
+}
+
+.block.is-event.has-project {
+  border-left-color: var(--proj);
+}
+
+.block.is-proposed.has-project {
+  border-color: var(--proj);
+  background: repeating-linear-gradient(135deg, var(--proj-soft) 0 8px, var(--paper) 8px 16px);
+  color: var(--ink);
+}
+
+.proj-list {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.proj-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-left: 4px solid var(--proj);
+  border-radius: 8px;
+}
+
+.proj-name {
+  font-weight: 600;
+}
+
+.colors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  margin: 4px 0 0;
+}
+
+.colors legend {
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--proj);
+  cursor: pointer;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+}
+
+.swatch.is-on {
+  outline-color: var(--ink);
+}
+
+.swatch input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.window-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.window-row input[type='time'] {
+  width: auto;
+}
+
+/* ---- checklist and waiting fields in the task dialog */
+
+.checklist,
+.waiting-fields {
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.checklist ul {
+  margin: 0 0 8px;
+  padding: 0;
+  list-style: none;
+}
+
+.checklist li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.checklist .step-text,
+.add-step input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--field);
+  color: var(--ink);
+}
+
+.add-step {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.add-step input {
+  flex: 1 1 160px;
+  width: auto;
+}
+
+label.inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+label.inline input {
+  width: auto;
+  margin: 0;
+}
+
+/* ---- dark mode */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --mist: #0f1523;
+    --paper: #182032;
+    --ink: #e6ebf4;
+    --muted: #9aa6bb;
+    --line: #2c3750;
+    --line-soft: #232c40;
+    --event: #22304d;
+    --event-edge: #7f9ee0;
+    --marigold: #b88a12;
+    --marigold-soft: #3a2f10;
+    --marigold-deep: #f2c75a;
+    --alert: #ff8a7a;
+    --alert-soft: #3d1d1a;
+    --header: #0a0f1b;
+    --field: #10172a;
+    --p-amber: #f0b94a;
+    --p-amber-soft: #3b2e10;
+    --p-teal: #4fd1c5;
+    --p-teal-soft: #113532;
+    --p-indigo: #8f9cff;
+    --p-indigo-soft: #1f2550;
+    --p-rose: #ff7fa3;
+    --p-rose-soft: #40182a;
+    --p-green: #6fd47f;
+    --p-green-soft: #163a1d;
+    --p-violet: #b892ff;
+    --p-violet-soft: #2d1f4a;
+    --p-orange: #ff9d5c;
+    --p-orange-soft: #40230f;
+    --p-slate: #a7b2c6;
+    --p-slate-soft: #262f42;
+    color-scheme: dark;
+  }
+
+  .capture input,
+  .capture .btn-primary {
+    background: var(--field);
+    border-color: var(--line);
+    color: var(--ink);
+  }
+
+  .block.is-proposed {
+    background: repeating-linear-gradient(135deg, var(--marigold-soft) 0 8px, var(--paper) 8px 16px);
+  }
+
+  .modal {
+    background: var(--paper);
   }
 }

@@ -6,6 +6,7 @@ struct SettingsView: View {
     var onboarding = false
     @State private var connectionStatus: String?
     @State private var testing = false
+    @State private var showProjects = false
 
     var body: some View {
         @Bindable var model = model
@@ -47,6 +48,16 @@ struct SettingsView: View {
                 WorkingHoursSection(settings: settings)
             }
 
+            Section("Planning") {
+                Button {
+                    showProjects = true
+                } label: {
+                    LabeledContent("Projects", value: "\(model.liveProjects.count)")
+                }
+                .disabled(!model.isConfigured)
+                Toggle("Remind me when blocks start and follow-ups are due", isOn: $model.remindersEnabled)
+            }
+
             Section("Sync") {
                 if let last = model.lastSyncAt {
                     LabeledContent("Last sync", value: Format.relative(last))
@@ -60,6 +71,17 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .navigationTitle(onboarding ? "Set Up Planner" : "Settings")
+        .sheet(isPresented: $showProjects) {
+            NavigationStack {
+                ProjectsView()
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Done") { showProjects = false } }
+                    }
+            }
+            #if os(macOS)
+            .frame(minWidth: 480, minHeight: 480)
+            #endif
+        }
     }
 
     @ViewBuilder
@@ -148,6 +170,13 @@ private struct WorkingHoursSection: View {
             }
             Stepper("Longest block: \(Format.duration(draft.maxBlockMin))", value: $draft.maxBlockMin, in: 30...480, step: 15)
             Stepper("Plan \(draft.horizonDays) days ahead", value: $draft.horizonDays, in: 1...60)
+            Stepper(
+                draft.bufferMin == 0 ? "No buffer around long events" : "\(draft.bufferMin) min buffer around events of \(Format.duration(draft.bufferMinEventMin))+",
+                value: $draft.bufferMin, in: 0...120, step: 5
+            )
+            if draft.bufferMin > 0 {
+                Stepper("Long event: \(Format.duration(draft.bufferMinEventMin)) or more", value: $draft.bufferMinEventMin, in: 15...1440, step: 15)
+            }
             LabeledContent("Time zone", value: draft.timezone)
             if draft.timezone != TimeZone.current.identifier {
                 Button("Use This Device's Time Zone (\(TimeZone.current.identifier))") {
@@ -166,7 +195,9 @@ private struct WorkingHoursSection: View {
                             workEnd: draft.workEnd,
                             workDays: draft.workDays,
                             maxBlockMin: draft.maxBlockMin,
-                            horizonDays: draft.horizonDays
+                            horizonDays: draft.horizonDays,
+                            bufferMin: draft.bufferMin,
+                            bufferMinEventMin: draft.bufferMinEventMin
                         ))
                         saving = false
                     }

@@ -1,8 +1,14 @@
-import type { CalEvent, Captured, FreeSlot, ProposedBlock, ScheduleProposal, Settings, Task } from '../shared/types.js';
-import { parseCapture } from './capture.js';
+import type { CalEvent, Captured, FreeSlot, Project, ProposedBlock, ScheduleProposal, Settings, Task } from '../shared/types.js';
+import { matchProject, parseCapture } from './capture.js';
 import type { GoogleCalendar } from './google.js';
-import { findFreeSlots, proposeSchedule } from './scheduler.js';
-import type { EventInput, Store, TaskInput } from './store.js';
+import { batchTitle, findFreeSlots, proposeSchedule } from './scheduler.js';
+import type { EventInput, ProjectInput, Store, TaskInput } from './store.js';
+
+/** A block to book: one task, or a batch of short tasks sharing one block. */
+export type Booking = { startAt: string; endAt: string; taskId?: string; taskIds?: string[] };
+
+/** Statuses that hold no reserved time: finishing or handing off gives future blocks back. */
+const RELEASES_TIME = new Set<Task['status']>(['done', 'waiting']);
 
 export class NotFound extends Error {}
 export class ReadOnly extends Error {}
@@ -27,36 +33,106 @@ export class Planner {
     }
   }
 
+  // ---- projects
+
+  listProjects(opts: { includeArchived?: boolean } = {}): Project[] {
+    return this.store.listProjects(opts);
+  }
+
+  createProject(input: ProjectInput & { name: string }): Project {
+    return this.store.createProject(input);
+  }
+
+  updateProject(id: string, patch: ProjectInput): Project {
+    const project = this.store.updateProject(id, patch);
+    if (!project) throw new NotFound(`No project with id ${id}`);
+    return project;
+  }
+
+  removeProject(id: string): { result: 'deleted' | 'archived' } {
+    const result = this.store.removeProject(id);
+    if (!result) throw new NotFound(`No project with id ${id}`);
+    return { result };
+  }
+
+  /** Find a project by id, #tag, tag or name (what an agent or a person would type). */
+  resolveProject(ref: string): Project {
+    const all = this.store.listProjects({ includeArchived: true });
+    const byId = all.find((p) => p.id === ref);
+    const byName = all.find((p) => p.name.toLowerCase() === ref.trim().toLowerCase());
+    const found = byId ?? byName ?? matchProject(ref.replace(/^#/, ''), all);
+    if (!found) throw new NotFound(`No project matches "${ref}". Known: ${all.filter((p) => !p.archived).map((p) => `#${p.tag}`).join(', ') || 'none yet'}.`);
+    return found;
+  }
+
+  private checkProject(projectId: string | null | undefined): void {
+    if (projectId && !this.store.getProject(projectId)) throw new NotFound(`No project with id ${projectId}`);
+  }
+
   // ---- tasks
 
-  listTasks(filter: { status?: string } = {}): Task[] {
+  listTasks(filter: { status?: string; projectId?: string } = {}): Task[] {
     return this.store.listTasks(filter);
   }
 
   createTask(input: TaskInput & { title: string }): Task {
+    this.checkProject(input.projectId);
+    if (input.status === 'waiting' && !input.followUpAt) {
+      input = { ...input, followUpAt: new Date(Date.now() + 2 * 86400_000).toISOString() };
+    }
     return this.store.createTask(input);
   }
 
   async updateTask(id: string, patch: TaskInput): Promise<Task> {
+    if ('projectId' in patch) this.checkProject(patch.projectId);
     const before = this.store.getTask(id);
+    if (before && patch.status === 'waiting' && !patch.followUpAt && !before.followUpAt) {
+      patch = { ...patch, followUpAt: new Date(Date.now() + 2 * 86400_000).toISOString() };
+    }
     const task = this.store.updateTask(id, patch);
     if (!before || !task) throw new NotFound(`No task with id ${id}`);
 
     const now = new Date().toISOString();
-    const blocks = this.store.listEvents({ from: now }).filter((e) => e.taskId === id);
-    if (task.status === 'done' && before.status !== 'done') {
-      // Finishing early gives the reserved time back.
-      for (const b of blocks.filter((b) => b.startAt > now)) await this.deleteEvent(b.id);
+    const blocks = this.store.blocksForTask(id, { from: now });
+    if (RELEASES_TIME.has(task.status) && !RELEASES_TIME.has(before.status)) {
+      // Finishing early, or handing it to someone else, gives the reserved time back.
+      await this.releaseBlocks(id, blocks.filter((b) => b.startAt > now));
     } else if (task.title !== before.title) {
-      for (const b of blocks) await this.updateEvent(b.id, { title: task.title });
+      for (const b of blocks.filter((b) => b.taskId === id)) await this.updateEvent(b.id, { title: task.title });
     }
     return task;
   }
 
+  /** Drop this task's future blocks; a batch is removed only once none of its tasks still need it. */
+  private async releaseBlocks(taskId: string, blocks: CalEvent[]): Promise<void> {
+    for (const b of blocks) {
+      if (b.taskId === taskId) {
+        await this.deleteEvent(b.id);
+        continue;
+      }
+      const stillOpen = b.taskIds.filter((t) => t !== taskId && this.store.getTask(t)?.status === 'todo');
+      if (stillOpen.length === 0) await this.deleteEvent(b.id);
+    }
+  }
+
   async deleteTask(id: string): Promise<void> {
-    const blocks = this.store.listEvents().filter((e) => e.taskId === id);
-    for (const b of blocks) await this.deleteEvent(b.id);
+    const blocks = this.store.blocksForTask(id);
+    for (const b of blocks) {
+      if (b.taskId === id) {
+        await this.deleteEvent(b.id);
+        continue;
+      }
+      const rest = b.taskIds.filter((t) => t !== id);
+      if (rest.length === 0) await this.deleteEvent(b.id);
+      else this.store.updateEvent(b.id, { taskIds: rest, title: batchTitle(rest.length) });
+    }
     if (!this.store.deleteTask(id)) throw new NotFound(`No task with id ${id}`);
+  }
+
+  /** Waiting tasks whose follow-up time has come go back on the open list. */
+  resurfaceWaiting(now = new Date()): Task[] {
+    const due = this.store.listTasks({ status: 'waiting' }).filter((t) => t.followUpAt && Date.parse(t.followUpAt) <= now.getTime());
+    return due.map((t) => this.store.updateTask(t.id, { status: 'todo' })!);
   }
 
   // ---- events
@@ -67,6 +143,8 @@ export class Planner {
 
   async createEvent(input: EventInput & { title: string; startAt: string; endAt: string }): Promise<CalEvent> {
     if (input.taskId && !this.store.getTask(input.taskId)) throw new NotFound(`No task with id ${input.taskId}`);
+    for (const t of input.taskIds ?? []) if (!this.store.getTask(t)) throw new NotFound(`No task with id ${t}`);
+    this.checkProject(input.projectId);
     let event = this.store.createEvent({ ...input, googleId: null, externalId: null, source: 'local' });
     await this.withGoogle(async () => {
       const googleId = await this.google.push(event);
@@ -104,22 +182,33 @@ export class Planner {
   // ---- capture
 
   preview(text: string): Captured {
-    return parseCapture(text, { timezone: this.store.getSettings().timezone });
+    return parseCapture(text, {
+      timezone: this.store.getSettings().timezone,
+      projects: this.store.listProjects({ includeArchived: true }),
+    });
   }
 
-  async capture(text: string): Promise<{ parsed: Captured; task?: Task; event?: CalEvent }> {
+  async capture(text: string): Promise<{ parsed: Captured; task?: Task; event?: CalEvent; project?: Project }> {
     const parsed = this.preview(text);
+    let projectId = parsed.projectId;
+    let project: Project | undefined;
+    if (!projectId && parsed.newProject) {
+      project = this.store.createProject({ name: parsed.projectTag ?? parsed.newProject, tag: parsed.newProject });
+      projectId = project.id;
+    }
     if (parsed.kind === 'event') {
-      const event = await this.createEvent({ title: parsed.title, startAt: parsed.startAt!, endAt: parsed.endAt! });
-      return { parsed, event };
+      const event = await this.createEvent({ title: parsed.title, startAt: parsed.startAt!, endAt: parsed.endAt!, projectId });
+      return { parsed, event, ...(project ? { project } : {}) };
     }
     const task = this.createTask({
       title: parsed.title,
       priority: parsed.priority,
       dueAt: parsed.dueAt,
+      projectId,
       ...(parsed.estimateMin ? { estimateMin: parsed.estimateMin } : {}),
+      ...(parsed.waitingOn ? { status: 'waiting' as const, waitingOn: parsed.waitingOn, followUpAt: parsed.followUpAt } : {}),
     });
-    return { parsed, task };
+    return { parsed, task, ...(project ? { project } : {}) };
   }
 
   // ---- scheduling
@@ -131,22 +220,29 @@ export class Planner {
     return findFreeSlots(events, this.store.getSettings(), { from, to, minMinutes: opts.minMinutes });
   }
 
-  propose(opts: { taskIds?: string[] } = {}): ScheduleProposal {
-    const now = new Date();
+  propose(opts: { taskIds?: string[]; now?: Date } = {}): ScheduleProposal {
+    const now = opts.now ?? new Date();
     return proposeSchedule({
       tasks: this.store.listTasks({ status: 'todo' }),
       events: this.store.listEvents({ from: now.toISOString() }),
       settings: this.store.getSettings(),
+      projects: this.store.listProjects(),
       now,
       taskIds: opts.taskIds,
     });
   }
 
-  async apply(blocks: Pick<ProposedBlock, 'taskId' | 'startAt' | 'endAt'>[]): Promise<CalEvent[]> {
+  async apply(blocks: Booking[]): Promise<CalEvent[]> {
     const created: CalEvent[] = [];
     for (const b of blocks) {
-      const task = this.store.getTask(b.taskId);
-      if (!task) throw new NotFound(`No task with id ${b.taskId}`);
+      if (b.taskIds && b.taskIds.length > 1) {
+        for (const id of b.taskIds) if (!this.store.getTask(id)) throw new NotFound(`No task with id ${id}`);
+        created.push(await this.createEvent({ title: batchTitle(b.taskIds.length), startAt: b.startAt, endAt: b.endAt, taskIds: b.taskIds }));
+        continue;
+      }
+      const taskId = b.taskId ?? b.taskIds?.[0];
+      const task = taskId ? this.store.getTask(taskId) : null;
+      if (!task) throw new NotFound(`No task with id ${taskId}`);
       created.push(await this.createEvent({ title: task.title, startAt: b.startAt, endAt: b.endAt, taskId: task.id }));
     }
     return created;

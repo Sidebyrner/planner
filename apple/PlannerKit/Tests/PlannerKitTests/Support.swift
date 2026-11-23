@@ -56,6 +56,16 @@ enum Fixture {
         #"{"upserted":0,"removed":0,"blocks":[\#(blocks.joined(separator: ","))],"rejected":\#(rejected)}"#
     }
 
+    /// /api/state as a server from before projects sent it.
+    static let legacyState = """
+    {
+      "tasks": [{"id":"t1","title":"Write report","notes":"","status":"todo","priority":2,"estimateMin":60,"dueAt":null,"createdAt":"2026-11-20T10:00:00.000Z","completedAt":null}],
+      "events": [{"id":"e1","title":"Write report","notes":"","startAt":"2026-11-24T14:00:00.000Z","endAt":"2026-11-24T15:00:00.000Z","allDay":false,"taskId":"t1","googleId":null,"externalId":null,"source":"local"}],
+      "settings": {"timezone":"UTC","timezoneConfirmed":true,"workStart":"09:00","workEnd":"17:00","workDays":[1,2,3,4,5],"maxBlockMin":120,"horizonDays":14},
+      "google": {"configured":false,"connected":false,"lastSyncAt":null,"error":null}
+    }
+    """
+
     static let state = """
     {
       "tasks": [

@@ -1,8 +1,28 @@
 import * as chrono from 'chrono-node';
 import { DateTime } from 'luxon';
-import type { Captured } from '../shared/types.js';
+import type { Captured, Project } from '../shared/types.js';
+import { slugTag } from './store.js';
 
 const DURATION = /(?:\bfor\s+)?(?<![\w:.])(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i;
+const TAG = /(?:^|\s)#([\p{L}\p{N}][\p{L}\p{N}_'’-]*)/u;
+const MENTION = /(?:^|\s)@([\p{L}][\p{L}\p{N}_'’.-]*)/u;
+/** Waiting tasks with no date given come back after this many days. */
+const DEFAULT_FOLLOW_UP_DAYS = 2;
+
+/** Exact tag first, then a single project whose tag or name starts with what was typed. */
+export function matchProject(typed: string, projects: Project[]): Project | null {
+  const slug = slugTag(typed);
+  if (!slug) return null;
+  const live = projects.filter((p) => !p.archived);
+  const exact = live.find((p) => p.tag === slug) ?? projects.find((p) => p.tag === slug);
+  if (exact) return exact;
+  const prefixed = live.filter((p) => p.tag.startsWith(slug) || slugTag(p.name).startsWith(slug));
+  return prefixed.length === 1 ? prefixed[0] : null;
+}
+
+function cut(text: string, m: RegExpMatchArray): string {
+  return (text.slice(0, m.index) + ' ' + text.slice(m.index! + m[0].length)).trim();
+}
 const DEADLINE_WORD = /\b(by|due|before|until)\s*$/i;
 const LEAD_IN_WORD = /\b(on|at|from|this|next)\s*$/i;
 
@@ -15,8 +35,11 @@ const LEAD_IN_WORD = /\b(on|at|from|this|next)\s*$/i;
  *
  * A stated clock time means an event, unless it follows "by", "due" or "before".
  * Start the line with "task:" or "event:" to force either reading.
+ *
+ *   "Order kegs #bar 15m"            -> task in the project tagged #bar
+ *   "@Sam send the invoice Friday"   -> waiting on Sam, follow up Friday
  */
-export function parseCapture(input: string, opts: { now?: Date; timezone: string }): Captured {
+export function parseCapture(input: string, opts: { now?: Date; timezone: string; projects?: Project[] }): Captured {
   const now = opts.now ?? new Date();
   const zone = opts.timezone;
   let text = input.trim();
@@ -27,6 +50,28 @@ export function parseCapture(input: string, opts: { now?: Date; timezone: string
     forced = /task|todo/i.test(prefix[1]) ? 'task' : 'event';
     text = text.slice(prefix[0].length);
   }
+
+  let projectTag: string | null = null;
+  const tag = text.match(TAG);
+  if (tag) {
+    projectTag = tag[1];
+    text = cut(text, tag);
+  }
+  const project = projectTag ? matchProject(projectTag, opts.projects ?? []) : null;
+
+  let waitingOn: string | null = null;
+  const mention = text.match(MENTION);
+  if (mention && forced !== 'event') {
+    waitingOn = mention[1].replace(/[.'’-]+$/, '');
+    text = cut(text, mention);
+    forced = 'task';
+  }
+  const tagged = {
+    projectTag,
+    projectId: project?.id ?? null,
+    newProject: projectTag && !project ? slugTag(projectTag) || null : null,
+    waitingOn,
+  };
 
   let priority = 2;
   const pri = text.match(/(?:^|\s)(!{1,3}|!(?:high|low|urgent)|p[123]|urgent)(?=\s|$)/i);
@@ -95,6 +140,28 @@ export function parseCapture(input: string, opts: { now?: Date; timezone: string
       dueAt: null,
       startAt: start.toUTC().toISO(),
       endAt: end.toUTC().toISO(),
+      ...tagged,
+      followUpAt: null,
+    };
+  }
+
+  if (waitingOn) {
+    // For a waiting task the date says when to chase it, not when it's due.
+    const followUp = when
+      ? hasTime
+        ? when
+        : when.set({ hour: 9, minute: 0, second: 0, millisecond: 0 })
+      : ref.plus({ days: DEFAULT_FOLLOW_UP_DAYS }).set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+    return {
+      kind,
+      title,
+      priority,
+      estimateMin,
+      dueAt: null,
+      startAt: null,
+      endAt: null,
+      ...tagged,
+      followUpAt: followUp.toUTC().toISO(),
     };
   }
 
@@ -107,5 +174,7 @@ export function parseCapture(input: string, opts: { now?: Date; timezone: string
     dueAt: due ? due.toUTC().toISO() : null,
     startAt: null,
     endAt: null,
+    ...tagged,
+    followUpAt: null,
   };
 }
