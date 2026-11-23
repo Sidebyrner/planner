@@ -28,6 +28,104 @@ public struct ChecklistItem: Codable, Identifiable, Hashable, Sendable {
     }
 }
 
+/// What a task or project depends on: an email thread, a doc, a contract.
+/// Named `TaskLink` so it doesn't clash with SwiftUI's `Link`.
+public struct TaskLink: Codable, Hashable, Sendable, Identifiable {
+    public var label: String
+    public var url: String
+
+    public var id: String { "\(label)|\(url)" }
+    /// Only schemes the server accepts and the app can open.
+    public var destination: URL? {
+        guard let u = URL(string: url), let scheme = u.scheme?.lowercased(), ["https", "http", "mailto", "tel"].contains(scheme) else { return nil }
+        return u
+    }
+
+    public init(label: String, url: String) {
+        self.label = label
+        self.url = url
+    }
+
+    /// Turns what someone typed into a link: adds https:// to a bare domain, mailto: to an email address.
+    public static func normalized(label: String, url raw: String) -> TaskLink? {
+        var url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { return nil }
+        if !url.contains(":") {
+            url = url.contains("@") && !url.contains("/") ? "mailto:\(url)" : "https://\(url)"
+        }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let link = TaskLink(label: name.isEmpty ? (URL(string: url)?.host() ?? url) : name, url: url)
+        return link.destination == nil ? nil : link
+    }
+}
+
+/// Who a waiting task is on, and how to reach them.
+public struct Contact: Codable, Hashable, Sendable {
+    public var name: String
+    public var email: String?
+    public var phone: String?
+
+    public init(name: String, email: String? = nil, phone: String? = nil) {
+        self.name = name
+        self.email = email
+        self.phone = phone
+    }
+}
+
+/// How a task repeats. Completing one instance makes the server create the next.
+public struct Recurrence: Codable, Hashable, Sendable {
+    public enum Frequency: String, Codable, Sendable, CaseIterable {
+        case daily, weekly, monthly
+    }
+
+    public var freq: Frequency
+    /// Every n days / weeks / months. nil = 1.
+    public var interval: Int?
+    /// ISO weekdays (1 = Monday) for weekly repeats.
+    public var byDay: [Int]?
+    /// Days of the month for monthly repeats; 31 means the month's last day when shorter.
+    public var byMonthDay: [Int]?
+    /// Keep the next one hidden until this many days before it's due.
+    public var leadTimeDays: Int?
+
+    public init(freq: Frequency, interval: Int? = nil, byDay: [Int]? = nil, byMonthDay: [Int]? = nil, leadTimeDays: Int? = nil) {
+        self.freq = freq
+        self.interval = interval
+        self.byDay = byDay
+        self.byMonthDay = byMonthDay
+        self.leadTimeDays = leadTimeDays
+    }
+
+    /// "Every week on Tue, Fri", "Monthly on the 15th · shows 3 days before".
+    public var summary: String {
+        let n = max(interval ?? 1, 1)
+        var text: String
+        switch freq {
+        case .daily: text = n == 1 ? "Every day" : "Every \(n) days"
+        case .weekly:
+            text = n == 1 ? "Every week" : "Every \(n) weeks"
+            if let days = byDay, !days.isEmpty {
+                let names = Calendar(identifier: .gregorian).shortWeekdaySymbols // Sun = 0
+                text += " on " + days.sorted().map { names[$0 % 7] }.joined(separator: ", ")
+            }
+        case .monthly:
+            text = n == 1 ? "Monthly" : "Every \(n) months"
+            if let days = byMonthDay, !days.isEmpty {
+                text += " on the " + days.sorted().map(Self.ordinal).joined(separator: " and ")
+            }
+        }
+        if let lead = leadTimeDays, lead > 0 {
+            text += " · shows \(lead) day\(lead == 1 ? "" : "s") before"
+        }
+        return text
+    }
+
+    static func ordinal(_ n: Int) -> String {
+        let suffix = (11...13).contains(n % 100) ? "th" : ["th", "st", "nd", "rd", "th", "th", "th", "th", "th", "th"][n % 10]
+        return "\(n)\(suffix)"
+    }
+}
+
 /// A task. Named `PlannerTask` because `Task` is Swift's concurrency type.
 public struct PlannerTask: Codable, Identifiable, Hashable, Sendable {
     public var id: String
@@ -45,8 +143,21 @@ public struct PlannerTask: Codable, Identifiable, Hashable, Sendable {
     /// Who it's waiting on; still set after a follow-up comes back to todo.
     public var waitingOn: String? = nil
     public var followUpAt: Date? = nil
+    public var links: [TaskLink] = []
+    public var contact: Contact? = nil
+    /// Where it came from ("gmail", "claude", "manual"), set by agents.
+    public var source: String? = nil
+    public var externalRef: String? = nil
+    public var recurrence: Recurrence? = nil
+    /// Shared by every instance of a repeating task.
+    public var seriesId: String? = nil
+    /// A repeating task stays out of sight until this time (its lead time).
+    public var showFrom: Date? = nil
 
     public var isDone: Bool { status == .done }
+    public var repeats: Bool { recurrence != nil }
+    /// Not shown yet: a repeating task still waiting for its lead time.
+    public func isUpcoming(now: Date = Date()) -> Bool { showFrom.map { $0 > now } ?? false }
     public var isWaiting: Bool { status == .waiting }
     public var checklistProgress: String? {
         checklist.isEmpty ? nil : "\(checklist.filter(\.done).count)/\(checklist.count)"
@@ -56,6 +167,7 @@ public struct PlannerTask: Codable, Identifiable, Hashable, Sendable {
 extension PlannerTask {
     private enum CodingKeys: String, CodingKey {
         case id, title, notes, status, priority, estimateMin, dueAt, createdAt, completedAt, projectId, checklist, waitingOn, followUpAt
+        case links, contact, source, externalRef, recurrence, seriesId, showFrom
     }
 
     /// Fields added later are optional, so a cache or server from before them still decodes.
@@ -74,6 +186,14 @@ extension PlannerTask {
         checklist = try c.decodeIfPresent([ChecklistItem].self, forKey: .checklist) ?? []
         waitingOn = try c.decodeIfPresent(String.self, forKey: .waitingOn)
         followUpAt = try c.decodeIfPresent(Date.self, forKey: .followUpAt)
+        links = try c.decodeIfPresent([TaskLink].self, forKey: .links) ?? []
+        contact = try c.decodeIfPresent(Contact.self, forKey: .contact)
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        externalRef = try c.decodeIfPresent(String.self, forKey: .externalRef)
+        // A repeat rule this build can't read is dropped rather than failing the whole state.
+        recurrence = try? c.decodeIfPresent(Recurrence.self, forKey: .recurrence)
+        seriesId = try c.decodeIfPresent(String.self, forKey: .seriesId)
+        showFrom = try c.decodeIfPresent(Date.self, forKey: .showFrom)
     }
 }
 
@@ -114,8 +234,30 @@ public struct Project: Codable, Identifiable, Hashable, Sendable {
     public var windowStrict: Bool
     /// Calendar events whose title contains this become time for this project.
     public var hostMatch: String?
+    public var links: [TaskLink] = []
 
     public var label: String { emoji.isEmpty ? name : "\(emoji) \(name)" }
+}
+
+extension Project {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, tag, color, emoji, archived, sortOrder, windows, windowStrict, hostMatch, links
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        tag = try c.decode(String.self, forKey: .tag)
+        color = try c.decode(ProjectColor.self, forKey: .color)
+        emoji = try c.decodeIfPresent(String.self, forKey: .emoji) ?? ""
+        archived = try c.decodeIfPresent(Bool.self, forKey: .archived) ?? false
+        sortOrder = try c.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
+        windows = try c.decodeIfPresent([TimeWindow].self, forKey: .windows) ?? []
+        windowStrict = try c.decodeIfPresent(Bool.self, forKey: .windowStrict) ?? false
+        hostMatch = try c.decodeIfPresent(String.self, forKey: .hostMatch)
+        links = try c.decodeIfPresent([TaskLink].self, forKey: .links) ?? []
+    }
 }
 
 public enum EventSource: String, Codable, Sendable {
@@ -310,14 +452,21 @@ public struct TaskDraft: Encodable, Hashable, Sendable {
     public var estimateMin: Int?
     public var dueAt: Date?
     public var projectId: String?
+    public var links: [TaskLink]?
+    public var recurrence: Recurrence?
 
-    public init(title: String, notes: String? = nil, priority: Int? = nil, estimateMin: Int? = nil, dueAt: Date? = nil, projectId: String? = nil) {
+    public init(
+        title: String, notes: String? = nil, priority: Int? = nil, estimateMin: Int? = nil, dueAt: Date? = nil, projectId: String? = nil,
+        links: [TaskLink]? = nil, recurrence: Recurrence? = nil
+    ) {
         self.title = title
         self.notes = notes
         self.priority = priority
         self.estimateMin = estimateMin
         self.dueAt = dueAt
         self.projectId = projectId
+        self.links = links
+        self.recurrence = recurrence
     }
 }
 
@@ -333,11 +482,18 @@ public struct TaskPatch: Encodable, Hashable, Sendable {
     public var checklist: [ChecklistItem]?
     public var waitingOn: String??
     public var followUpAt: Date??
+    public var links: [TaskLink]?
+    public var contact: Contact??
+    public var recurrence: Recurrence??
 
     public init(
         title: String? = nil, notes: String? = nil, status: TaskStatus? = nil, priority: Int? = nil, estimateMin: Int? = nil,
-        dueAt: Date?? = nil, projectId: String?? = nil, checklist: [ChecklistItem]? = nil, waitingOn: String?? = nil, followUpAt: Date?? = nil
+        dueAt: Date?? = nil, projectId: String?? = nil, checklist: [ChecklistItem]? = nil, waitingOn: String?? = nil, followUpAt: Date?? = nil,
+        links: [TaskLink]? = nil, contact: Contact?? = nil, recurrence: Recurrence?? = nil
     ) {
+        self.links = links
+        self.contact = contact
+        self.recurrence = recurrence
         self.title = title
         self.notes = notes
         self.status = status
@@ -351,7 +507,7 @@ public struct TaskPatch: Encodable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case title, notes, status, priority, estimateMin, dueAt, projectId, checklist, waitingOn, followUpAt
+        case title, notes, status, priority, estimateMin, dueAt, projectId, checklist, waitingOn, followUpAt, links, contact, recurrence
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -366,6 +522,9 @@ public struct TaskPatch: Encodable, Hashable, Sendable {
         try Self.encode(projectId, .projectId, &c)
         try Self.encode(waitingOn, .waitingOn, &c)
         try Self.encode(followUpAt, .followUpAt, &c)
+        try c.encodeIfPresent(links, forKey: .links)
+        try Self.encode(contact, .contact, &c)
+        try Self.encode(recurrence, .recurrence, &c)
     }
 
     private static func encode<T: Encodable>(_ value: T??, _ key: CodingKeys, _ c: inout KeyedEncodingContainer<CodingKeys>) throws {

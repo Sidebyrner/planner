@@ -90,4 +90,54 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(rest, "Before the rep visit.\nBring the regular's number.")
         XCTAssertTrue(Checklist.fromNotes("Just a sentence. No list.").items.isEmpty)
     }
+
+    func testDecodesLinksContactAndRepeats() throws {
+        let json = #"""
+        {"id":"t1","title":"Mortgage","notes":"","status":"todo","priority":2,"estimateMin":15,"dueAt":"2026-12-15T22:00:00.000Z",
+         "createdAt":"2026-11-20T10:00:00.000Z","completedAt":null,
+         "links":[{"label":"Lender","url":"https://example.com/pay"}],
+         "contact":{"name":"Matt","email":"matt@example.com"},
+         "source":"gmail","externalRef":"thread-1",
+         "recurrence":{"freq":"monthly","byMonthDay":[15],"leadTimeDays":3},
+         "seriesId":"s1","showFrom":"2099-12-12T05:00:00.000Z"}
+        """#
+        let task = try PlannerJSON.decoder().decode(PlannerTask.self, from: Data(json.utf8))
+        XCTAssertEqual(task.links.first?.destination?.host(), "example.com")
+        XCTAssertEqual(task.contact, Contact(name: "Matt", email: "matt@example.com"))
+        XCTAssertEqual(task.recurrence?.summary, "Monthly on the 15th · shows 3 days before")
+        XCTAssertTrue(task.repeats)
+        XCTAssertTrue(task.isUpcoming())
+
+        // The cache writes what it read, so a round trip keeps the new fields.
+        let again = try PlannerJSON.decoder().decode(PlannerTask.self, from: PlannerJSON.encoder().encode(task))
+        XCTAssertEqual(again, task)
+    }
+
+    func testAnUnreadableRepeatRuleIsDropped() throws {
+        let json = #"{"id":"t9","title":"x","notes":"","status":"todo","priority":2,"estimateMin":30,"dueAt":null,"createdAt":"2026-11-20T10:00:00.000Z","completedAt":null,"recurrence":{"freq":"yearly"}}"#
+        XCTAssertNil(try PlannerJSON.decoder().decode(PlannerTask.self, from: Data(json.utf8)).recurrence)
+    }
+
+    func testRepeatSummaries() {
+        XCTAssertEqual(Recurrence(freq: .weekly, byDay: [5, 2]).summary, "Every week on Tue, Fri")
+        XCTAssertEqual(Recurrence(freq: .weekly, interval: 2, byDay: [7]).summary, "Every 2 weeks on Sun")
+        XCTAssertEqual(Recurrence(freq: .daily).summary, "Every day")
+        XCTAssertEqual(Recurrence(freq: .monthly, byMonthDay: [1, 22]).summary, "Monthly on the 1st and 22nd")
+    }
+
+    func testNormalizesTypedLinks() {
+        XCTAssertEqual(TaskLink.normalized(label: "", url: "docs.google.com/d/1"), TaskLink(label: "docs.google.com", url: "https://docs.google.com/d/1"))
+        XCTAssertEqual(TaskLink.normalized(label: "Matt", url: "matt@example.com")?.url, "mailto:matt@example.com")
+        XCTAssertNil(TaskLink.normalized(label: "x", url: "javascript:alert(1)"))
+        XCTAssertNil(TaskLink.normalized(label: "x", url: "  "))
+    }
+
+    func testPatchSendsAndClearsTheNewFields() throws {
+        let patch = TaskPatch(links: [TaskLink(label: "Doc", url: "https://d")], contact: .some(nil), recurrence: .some(Recurrence(freq: .daily)))
+        let body = try JSONSerialization.jsonObject(with: PlannerJSON.encoder().encode(patch)) as! [String: Any]
+        XCTAssertEqual((body["links"] as? [[String: String]])?.first?["url"], "https://d")
+        XCTAssertTrue(body["contact"] is NSNull)
+        XCTAssertEqual((body["recurrence"] as? [String: Any])?["freq"] as? String, "daily")
+        XCTAssertNil(body["title"])
+    }
 }

@@ -275,7 +275,9 @@ final class AppModel {
     // MARK: Derived
 
     var openTasks: [PlannerTask] {
-        (state?.tasks ?? []).filter { !$0.isDone }.sorted { a, b in
+        // Waiting tasks have their own list. A repeating task in its lead time (a bill not due
+        // for weeks) stays out of sight.
+        (state?.tasks ?? []).filter { $0.status == .todo && !$0.isUpcoming() }.sorted { a, b in
             switch (a.dueAt, b.dueAt) {
             case let (x?, y?) where x != y: return x < y
             case (.some, nil): return true

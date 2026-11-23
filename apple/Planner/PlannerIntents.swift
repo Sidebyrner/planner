@@ -25,7 +25,7 @@ enum IntentClient {
     }
 
     static func openTasks() async throws -> [PlannerTask] {
-        try await api().state().tasks.filter { $0.status == .todo }
+        try await api().state().tasks.filter { $0.status == .todo && !$0.isUpcoming() }
     }
 
     /// What Siri says after a capture.

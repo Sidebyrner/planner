@@ -157,9 +157,17 @@ struct TaskRow: View {
 
             Button(action: onOpen) {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(task.title)
-                        .strikethrough(task.isDone)
-                        .foregroundStyle(task.isDone ? Color.secondary : Color.primary)
+                    HStack(spacing: 4) {
+                        Text(task.title)
+                            .strikethrough(task.isDone)
+                            .foregroundStyle(task.isDone ? Color.secondary : Color.primary)
+                        if task.repeats {
+                            Image(systemName: "repeat")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .accessibilityLabel(task.recurrence?.summary ?? "Repeats")
+                        }
+                    }
                     details
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -201,6 +209,10 @@ struct TaskRow: View {
             }
             if let progress = task.checklistProgress {
                 Label(progress, systemImage: "checklist")
+            }
+            if !task.links.isEmpty {
+                Label("\(task.links.count)", systemImage: "link")
+                    .accessibilityLabel("\(task.links.count) link\(task.links.count == 1 ? "" : "s")")
             }
             if let priority = Format.priority(task.priority) {
                 Text(priority).foregroundStyle(task.priority >= 3 ? Color.orange : Color.secondary)

@@ -69,7 +69,7 @@ struct Provider: TimelineProvider {
                 .sorted { $0.startAt < $1.startAt }
                 .prefix(12)
                 .map { EventSnapshot(title: $0.title, start: $0.startAt, end: $0.endAt, color: color($0)) }
-            let open = state.tasks.filter { $0.status == .todo }
+            let open = state.tasks.filter { $0.status == .todo && !$0.isUpcoming(now: now) }
             let followUps = open.filter { $0.waitingOn != nil }.count
 
             // One entry now, then one at each start/end in the next few hours.
