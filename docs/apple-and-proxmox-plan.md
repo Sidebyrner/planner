@@ -1,5 +1,13 @@
 # Planner for iOS and macOS
 
+> **Status (2026-11-23): done.** Steps 0–5 are complete. Changes from the plan below, found while building:
+> - **One calendar bridge.** Only one device (the Mac, by default) mirrors busy time and writes the "Planner" calendar; the iPhone uses the server only. Two bridges would fight over the server's mirror and duplicate events in a shared iCloud calendar.
+> - **All Planner events reach Apple Calendar**, not just task blocks (`PUT /api/device/events` returns every `source: local` event).
+> - **Step 5 used Tailscale Funnel, not a Cloudflare Tunnel, and no OAuth.** claude.ai custom connectors accept a fixed `Authorization` header, but call from Anthropic's cloud on port 443. Funnel exposes `/mcp` only on 443; the app moved to `:8443` on the tailnet.
+> - Container sized at 1 GB RAM / 8 GB disk (not 512 MB / 4 GB) so `npm ci` and the build have room.
+>
+> Current deployment details are in the README under "Self-hosted on Proxmox with Tailscale".
+
 ## Context
 
 The web Planner MVP is done and pushed to `Sidebyrner/planner` (`main`): a Node server with SQLite, a scheduler, plain-language capture, Google sync, and an MCP endpoint with 14 tools. You now want native iOS and macOS apps on your new Mac, with an assistant keeping track of your work and placing tasks and events on your calendar. You chose **both** data paths: Apple Calendar on the device, plus the Planner server so remote agents can reach everything.

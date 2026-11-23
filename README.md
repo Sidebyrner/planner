@@ -118,6 +118,20 @@ Generate the token and secret with `openssl rand -base64 32`. Add `GOOGLE_CLIENT
 
 In production the server refuses to start without `APP_PASSWORD`, `MCP_TOKEN` and `SESSION_SECRET`. Keep it to a single machine: the database is one file on one volume.
 
+### Self-hosted on Proxmox with Tailscale
+
+The running instance lives in an unprivileged Debian 12 LXC (container 109, `planner`) on a Proxmox host:
+
+- Code in `/opt/planner`, owned by the `planner` system user; database in `/var/lib/planner/planner.db`.
+- Config and secrets in `/etc/planner.env` (root, mode 600): `NODE_ENV`, `HOST=127.0.0.1`, `PORT`, `PUBLIC_URL`, `DATABASE_PATH`, `APP_PASSWORD`, `MCP_TOKEN`, `DEVICE_TOKEN`, `SESSION_SECRET`.
+- systemd unit from `deploy/planner.service`. Update with `/opt/planner/deploy/update.sh` (pull, build, restart).
+- Tailscale in the container, with two front doors:
+  - `https://<host>.<tailnet>.ts.net:8443`: the web app and `/api`, tailnet only (`tailscale serve --https=8443`). This is `PUBLIC_URL` and the address the iOS and macOS apps use.
+  - `https://<host>.<tailnet>.ts.net/mcp`: public through Tailscale Funnel on port 443, `/mcp` only, so claude.ai connectors (which call from Anthropic's cloud) can reach it. Every other path is 404 there, and `/mcp` requires `MCP_TOKEN`.
+- Nightly `vzdump` snapshot of the container on the Proxmox host.
+
+To connect Claude: claude.ai → Customize → Connectors → Add custom connector, URL `https://<host>.<tailnet>.ts.net/mcp`, no sign-in, request header `Authorization: Bearer <MCP_TOKEN>`. It then works on the web and in the mobile apps.
+
 ## How it is put together
 
 ```
