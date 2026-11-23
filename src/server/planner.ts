@@ -1,11 +1,30 @@
-import type { CalEvent, Captured, FreeSlot, Project, ProposedBlock, ScheduleProposal, Settings, Task } from '../shared/types.js';
+import { seriesKey, type CalEvent, type Captured, type FreeSlot, type Project, type ScheduleProposal, type Settings, type Task } from '../shared/types.js';
 import { matchProject, parseCapture } from './capture.js';
 import type { GoogleCalendar } from './google.js';
-import { batchTitle, findFreeSlots, proposeSchedule } from './scheduler.js';
+import { nextDue, showFromFor } from './recurrence.js';
+import { batchTitle, busyMatcher, findFreeSlots, ignoreMatcher, proposeSchedule } from './scheduler.js';
 import type { EventInput, ProjectInput, Store, TaskInput } from './store.js';
 
 /** A block to book: one task, or a batch of short tasks sharing one block. */
 export type Booking = { startAt: string; endAt: string; taskId?: string; taskIds?: string[] };
+
+/** What a block is for, with what's needed to start on it right away. */
+export interface BlockDetail {
+  block: CalEvent;
+  minutesUntilStart: number;
+  minutesLeft: number;
+  tasks: {
+    id: string;
+    title: string;
+    notes: string;
+    /** "Step 2 of 5: tape the trim" */
+    nextStep: { id: string; text: string; number: number; of: number } | null;
+    checklist: Task['checklist'];
+    links: Task['links'];
+    contact: Task['contact'];
+    project: { id: string; name: string; tag: string; links: Project['links'] } | null;
+  }[];
+}
 
 /** Statuses that hold no reserved time: finishing or handing off gives future blocks back. */
 const RELEASES_TIME = new Set<Task['status']>(['done', 'waiting']);
@@ -73,7 +92,7 @@ export class Planner {
 
   // ---- tasks
 
-  listTasks(filter: { status?: string; projectId?: string } = {}): Task[] {
+  listTasks(filter: { status?: string; projectId?: string; externalRef?: string; seriesId?: string } = {}): Task[] {
     return this.store.listTasks(filter);
   }
 
@@ -81,6 +100,9 @@ export class Planner {
     this.checkProject(input.projectId);
     if (input.status === 'waiting' && !input.followUpAt) {
       input = { ...input, followUpAt: new Date(Date.now() + 2 * 86400_000).toISOString() };
+    }
+    if (input.recurrence && input.showFrom === undefined) {
+      input = { ...input, showFrom: showFromFor(input.recurrence, input.dueAt, this.store.getSettings().timezone) };
     }
     return this.store.createTask(input);
   }
@@ -96,6 +118,7 @@ export class Planner {
 
     const now = new Date().toISOString();
     const blocks = this.store.blocksForTask(id, { from: now });
+    if (task.status === 'done' && before.status !== 'done') this.repeat(task);
     if (RELEASES_TIME.has(task.status) && !RELEASES_TIME.has(before.status)) {
       // Finishing early, or handing it to someone else, gives the reserved time back.
       await this.releaseBlocks(id, blocks.filter((b) => b.startAt > now));
@@ -103,6 +126,35 @@ export class Planner {
       for (const b of blocks.filter((b) => b.taskId === id)) await this.updateEvent(b.id, { title: task.title });
     }
     return task;
+  }
+
+  /**
+   * Completing a repeating task queues the next one. Done instances stay as
+   * history (weekly_review counts them). Nothing new if the series already has
+   * an open instance, so reopening and re-completing doesn't double up.
+   */
+  private repeat(task: Task): Task | null {
+    if (!task.recurrence) return null;
+    const seriesId = task.seriesId ?? task.id;
+    const open = this.store.listTasks({ seriesId }).some((t) => t.id !== task.id && t.status !== 'done');
+    if (open) return null;
+    const zone = this.store.getSettings().timezone;
+    const dueAt = nextDue(task.recurrence, task.dueAt, new Date(), zone);
+    return this.store.createTask({
+      title: task.title,
+      notes: task.notes,
+      priority: task.priority,
+      estimateMin: task.estimateMin,
+      dueAt,
+      projectId: task.projectId,
+      checklist: task.checklist.map((c) => ({ ...c, done: false })),
+      links: task.links,
+      contact: task.contact,
+      source: task.source,
+      recurrence: task.recurrence,
+      seriesId,
+      showFrom: showFromFor(task.recurrence, dueAt, zone),
+    });
   }
 
   /** Drop this task's future blocks; a batch is removed only once none of its tasks still need it. */
@@ -179,6 +231,91 @@ export class Planner {
     const event = this.assertEditable(id);
     this.store.deleteEvent(id);
     if (event.googleId) await this.withGoogle(() => this.google.remove(event.googleId!));
+  }
+
+  /**
+   * Have the scheduler ignore an event (scope "event"), every occurrence of its
+   * series ("series"), or undo either. Works on read-only device events too:
+   * the flag lives in Planner, not in the calendar.
+   */
+  ignoreEvent(id: string, opts: { scope: 'event' | 'series'; ignore: boolean }): { event: CalEvent; ignoredSeries: string[] } {
+    const event = this.store.getEvent(id);
+    if (!event) throw new NotFound(`No event with id ${id}`);
+    if (event.taskId || event.taskIds.length) throw new Error('That is a Planner task block; delete it or move it instead.');
+    let settings = this.store.getSettings();
+    if (opts.scope === 'event') {
+      this.store.updateEvent(id, { ignored: opts.ignore });
+    } else {
+      const key = seriesKey(event);
+      const rest = settings.ignoredSeries.filter((s) => s !== key);
+      settings = this.store.setSettings({ ignoredSeries: opts.ignore ? [...rest, key] : rest });
+      // Undoing a series also clears any one-off flags inside it.
+      if (!opts.ignore) {
+        for (const e of this.store.listEvents()) if (e.ignored && seriesKey(e) === key) this.store.updateEvent(e.id, { ignored: false });
+      }
+    }
+    return { event: this.store.getEvent(id)!, ignoredSeries: settings.ignoredSeries };
+  }
+
+  /** Whether the scheduler counts this event as busy, and why not if it doesn't. */
+  schedulingStatus(e: CalEvent): 'busy' | 'free' | 'ignored' {
+    const settings = this.store.getSettings();
+    if (busyMatcher(settings)(e)) return 'busy';
+    if (ignoreMatcher(settings)(e)) return 'ignored';
+    return e.allDay ? 'free' : 'busy';
+  }
+
+  // ---- now
+
+  blockDetail(block: CalEvent, now = Date.now()): BlockDetail {
+    const ids = block.taskIds.length ? block.taskIds : block.taskId ? [block.taskId] : [];
+    const tasks = ids.map((id) => this.store.getTask(id)).filter((t): t is Task => !!t);
+    return {
+      block,
+      minutesUntilStart: Math.max(0, Math.round((Date.parse(block.startAt) - now) / 60000)),
+      minutesLeft: Math.max(0, Math.round((Date.parse(block.endAt) - Math.max(now, Date.parse(block.startAt))) / 60000)),
+      tasks: tasks.map((t) => {
+        const index = t.checklist.findIndex((c) => !c.done);
+        const p = t.projectId ? this.store.getProject(t.projectId) : null;
+        return {
+          id: t.id,
+          title: t.title,
+          notes: t.notes,
+          nextStep: index < 0 ? null : { id: t.checklist[index].id, text: t.checklist[index].text, number: index + 1, of: t.checklist.length },
+          checklist: t.checklist,
+          links: t.links,
+          contact: t.contact,
+          project: p ? { id: p.id, name: p.name, tag: p.tag, links: p.links } : null,
+        };
+      }),
+    };
+  }
+
+  /** What's happening right now: the current block and event, and what's next. */
+  now(at = new Date()): {
+    now: string;
+    currentBlock: BlockDetail | null;
+    currentEvents: CalEvent[];
+    nextBlock: BlockDetail | null;
+    nextEvent: (CalEvent & { minutesUntilStart: number }) | null;
+  } {
+    const t = at.getTime();
+    const nowIso = at.toISOString();
+    const ahead = this.store.listEvents({ from: nowIso, to: new Date(t + 7 * 86400_000).toISOString() });
+    const counts = (e: CalEvent) => this.schedulingStatus(e) !== 'ignored' && !e.allDay;
+    const isBlock = (e: CalEvent) => !!e.taskId || e.taskIds.length > 0;
+    const current = ahead.filter((e) => Date.parse(e.startAt) <= t && counts(e));
+    const upcoming = ahead.filter((e) => Date.parse(e.startAt) > t && counts(e));
+    const block = current.find(isBlock);
+    const next = upcoming.find(isBlock);
+    const nextEvent = upcoming[0];
+    return {
+      now: nowIso,
+      currentBlock: block ? this.blockDetail(block, t) : null,
+      currentEvents: current.filter((e) => !isBlock(e)),
+      nextBlock: next ? this.blockDetail(next, t) : null,
+      nextEvent: nextEvent ? { ...nextEvent, minutesUntilStart: Math.round((Date.parse(nextEvent.startAt) - t) / 60000) } : null,
+    };
   }
 
   // ---- capture

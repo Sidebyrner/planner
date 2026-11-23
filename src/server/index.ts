@@ -21,7 +21,7 @@ if (production) {
 
 mkdirSync(dirname(dbPath), { recursive: true });
 
-const { app } = createApp({
+const { app, watcher } = createApp({
   dbPath,
   auth: {
     password: env.APP_PASSWORD,
@@ -36,11 +36,14 @@ const { app } = createApp({
     redirectUri: `${publicUrl}/api/google/callback`,
   },
   staticDir: join(import.meta.dirname, '../web'),
+  webhook: env.WEBHOOK_URL ? { url: env.WEBHOOK_URL, secret: env.WEBHOOK_SECRET } : undefined,
 });
+watcher?.start();
 
 const onListening = () => {
   console.log(`Planner running at ${publicUrl} (listening on ${host ?? 'all interfaces'}:${port})`);
   console.log(`MCP endpoint: ${publicUrl}/mcp`);
+  if (watcher) console.log('Sending block.started to WEBHOOK_URL as task blocks begin.');
   if (!env.APP_PASSWORD) console.log('No APP_PASSWORD set: the app is open to anyone who can reach this port.');
 };
 

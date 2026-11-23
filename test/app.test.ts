@@ -331,7 +331,7 @@ describe('MCP server', () => {
   it('lets an agent capture, plan and complete work end to end', async () => {
     const client = await connectClient();
     const tools = (await client.listTools()).tools.map((t) => t.name);
-    expect(tools).toEqual(expect.arrayContaining(['get_agenda', 'create_task', 'propose_schedule', 'apply_schedule', 'find_free_slots', 'capture']));
+    expect(tools).toEqual(expect.arrayContaining(['get_agenda', 'create_task', 'propose_schedule', 'apply_schedule', 'find_free_slots', 'capture', 'get_now', 'ignore_event', 'update_settings']));
 
     const task = await call(client, 'create_task', { title: 'Prep tasting menu', estimateMin: 60, priority: 3 });
     const proposal = await call(client, 'propose_schedule');

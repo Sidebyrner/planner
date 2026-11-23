@@ -8,6 +8,7 @@ import { GoogleCalendar, type GoogleConfig } from './google.js';
 import { mcpHandler } from './mcp.js';
 import { Planner } from './planner.js';
 import { Store } from './store.js';
+import { BlockWatcher, type WebhookConfig } from './webhook.js';
 
 export interface AppConfig {
   dbPath: string;
@@ -16,9 +17,11 @@ export interface AppConfig {
   /** Folder holding the built web app, if any. */
   staticDir?: string;
   fetchFn?: typeof fetch;
+  /** POST block.started here as each task block begins. */
+  webhook?: WebhookConfig;
 }
 
-export function createApp(config: AppConfig): { app: Express; planner: Planner } {
+export function createApp(config: AppConfig): { app: Express; planner: Planner; watcher: BlockWatcher | null } {
   const store = new Store(config.dbPath);
   const google = new GoogleCalendar(store, config.google, config.fetchFn);
   const planner = new Planner(store, google);
@@ -40,5 +43,6 @@ export function createApp(config: AppConfig): { app: Express; planner: Planner }
     app.get(/^(?!\/(api|mcp)\b).*/, (_req, res) => res.sendFile(join(config.staticDir!, 'index.html')));
   }
 
-  return { app, planner };
+  const watcher = config.webhook?.url ? new BlockWatcher(planner, { fetchFn: config.fetchFn, ...config.webhook }) : null;
+  return { app, planner, watcher };
 }

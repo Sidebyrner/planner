@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PROJECT_COLORS, type CalEvent, type Project, type Task } from '../shared/types.js';
 import type { Planner } from './planner.js';
-import { SettingsPatch } from './api.js';
+import { ContactSchema, LinksSchema, RecurrenceSchema, SettingsPatch } from './api.js';
 import { remainingMinutes, workRanges } from './scheduler.js';
 
 const when = z.string().describe('ISO 8601 timestamp with offset, e.g. 2026-11-24T14:00:00-05:00');
@@ -17,6 +17,22 @@ const timeWindow = z.object({
   start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).describe('"06:45"'),
   end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).describe('"08:15"'),
 });
+
+const taskExtras = {
+  links: LinksSchema.optional().describe('What the task depends on: [{label, url}], e.g. the email thread, Claude doc or contract.'),
+  contact: ContactSchema.nullable()
+    .optional()
+    .describe('Who a waiting task is on and how to reach them: {name, email?, phone?}. waitingOn stays the display name.'),
+  source: z.enum(['gmail', 'claude', 'manual']).nullable().optional().describe('Where the task came from.'),
+  externalRef: z.string().max(500).nullable().optional().describe('The source\'s own id (Gmail thread id, doc id), to match records later.'),
+  recurrence: RecurrenceSchema.nullable()
+    .optional()
+    .describe(
+      'Repeat: {freq: daily|weekly|monthly, interval?, byDay? (ISO weekdays, weekly), byMonthDay? (monthly), leadTimeDays?}. ' +
+        'Completing one creates the next. Give a dueAt to anchor it. E.g. mortgage by the 15th, shown from the 12th: ' +
+        '{freq:"monthly", byMonthDay:[15], leadTimeDays:3}; dishes Tue and Fri: {freq:"weekly", byDay:[2,5]}.',
+    ),
+};
 
 const hours = (minutes: number) => Math.round((minutes / 60) * 10) / 10;
 const minutesOf = (e: Pick<CalEvent, 'startAt' | 'endAt'>) => (Date.parse(e.endAt) - Date.parse(e.startAt)) / 60000;
@@ -56,12 +72,18 @@ export function buildMcpServer(planner: Planner): McpServer {
   const projectsById = () => new Map(planner.listProjects({ includeArchived: true }).map((p) => [p.id, p]));
   const projectId = (ref: string | null | undefined) => (ref ? planner.resolveProject(ref).id : ref === null || ref === '' ? null : undefined);
   /** Open-task view with what's left to schedule and when it's next on the calendar. */
+  /** Hide a repeating task until its lead time comes. */
+  const shown = (now: number) => (t: Task) => !t.showFrom || Date.parse(t.showFrom) <= now;
+  /** busy = blocks time, free = doesn't (all-day), ignored = the user said to leave it out. */
+  const withScheduling = (e: CalEvent) => ({ ...e, scheduling: planner.schedulingStatus(e) });
+
   const openTaskView = (t: Task, future: CalEvent[], now: number, projects: Map<string, Project>) => {
     const blocks = future.filter((e) => e.taskId === t.id || e.taskIds.includes(t.id));
     return {
       ...t,
       project: t.projectId ? projects.get(t.projectId)?.name ?? null : null,
       unscheduledMin: remainingMinutes(t, future, now),
+      ...(t.recurrence ? { repeats: t.recurrence } : {}),
       nextBlockAt: blocks[0]?.startAt ?? null,
       overdue: !!t.dueAt && Date.parse(t.dueAt) < now,
       checklistProgress: t.checklist.length ? `${t.checklist.filter((c) => c.done).length}/${t.checklist.length}` : null,
@@ -88,7 +110,7 @@ export function buildMcpServer(planner: Planner): McpServer {
       const nowIso = new Date(now).toISOString();
       const future = planner.listEvents({ from: nowIso });
       const projects = projectsById();
-      const open = planner.listTasks({ status: 'todo' }).map((t) => openTaskView(t, future, now, projects));
+      const open = planner.listTasks({ status: 'todo' }).filter(shown(now)).map((t) => openTaskView(t, future, now, projects));
       const groups = new Map<string, typeof open>();
       for (const t of open) groups.set(t.projectId ?? '', [...(groups.get(t.projectId ?? '') ?? []), t]);
       return {
@@ -98,7 +120,7 @@ export function buildMcpServer(planner: Planner): McpServer {
         timezoneConfirmed: settings.timezoneConfirmed,
         workingHours: workRanges(settings).map((r) => ({ isoWeekdays: r.days, start: r.start, end: r.end, ...(r.mode ? { mode: r.mode } : {}) })),
         busyMatch: settings.busyMatch,
-        events: planner.listEvents({ from: day.toUTC().toISO()!, to: day.plus({ days: 1 }).toUTC().toISO()! }),
+        events: planner.listEvents({ from: day.toUTC().toISO()!, to: day.plus({ days: 1 }).toUTC().toISO()! }).map(withScheduling),
         openTasksByProject: [...groups.entries()].map(([id, tasks]) => ({ project: projectLabel(projects.get(id)), projectId: id || null, tasks })),
         followUps: open.filter((t) => t.waitingOn).map((t) => ({ id: t.id, title: t.title, waitingOn: t.waitingOn })),
         google: planner.google.status(),
@@ -110,15 +132,26 @@ export function buildMcpServer(planner: Planner): McpServer {
     'list_tasks',
     {
       title: 'List tasks',
-      description: 'List tasks. Defaults to open tasks; pass status "waiting", "done" or "all" for others, and project to filter.',
-      inputSchema: { status: z.enum(['todo', 'waiting', 'done', 'all']).optional(), project: projectRef.optional() },
+      description:
+        'List tasks. Defaults to open tasks; pass status "waiting", "done" or "all" for others, and project to filter. ' +
+        'externalRef finds the task made from a given email thread or doc. Repeating tasks still in their lead time are ' +
+        'left out unless includeUpcoming.',
+      inputSchema: {
+        status: z.enum(['todo', 'waiting', 'done', 'all']).optional(),
+        project: projectRef.optional(),
+        externalRef: z.string().optional(),
+        includeUpcoming: z.boolean().optional(),
+      },
       annotations: { readOnlyHint: true },
     },
-    tool(({ status, project }) =>
-      planner.listTasks({
-        ...(status === 'all' ? {} : { status: status ?? 'todo' }),
-        ...(project ? { projectId: planner.resolveProject(project).id } : {}),
-      }),
+    tool(({ status, project, externalRef, includeUpcoming }) =>
+      planner
+        .listTasks({
+          ...(status === 'all' ? {} : { status: status ?? 'todo' }),
+          ...(project ? { projectId: planner.resolveProject(project).id } : {}),
+          ...(externalRef ? { externalRef } : {}),
+        })
+        .filter(includeUpcoming || externalRef ? () => true : shown(Date.now())),
     ),
   );
 
@@ -139,6 +172,7 @@ export function buildMcpServer(planner: Planner): McpServer {
         checklist: z.array(z.string().min(1)).max(100).optional().describe('Steps, in order.'),
         waitingOn: z.string().min(1).optional(),
         followUpAt: when.optional().describe('When to chase a waiting task. Default: in two days.'),
+        ...taskExtras,
       },
     },
     tool(({ project, checklist, ...args }) =>
@@ -156,8 +190,9 @@ export function buildMcpServer(planner: Planner): McpServer {
     {
       title: 'Update task',
       description:
-        'Change a task. Status "done" completes it and "waiting" hands it to someone else (both release its future time ' +
-        'blocks); "todo" reopens it. Pass dueAt or project null to clear them.',
+        'Change a task. Status "done" completes it (a repeating task then queues its next instance) and "waiting" hands ' +
+        'it to someone else (both release its future time blocks); "todo" reopens it. Pass dueAt or project null to ' +
+        'clear them. links replaces the whole list.',
       inputSchema: {
         id: z.string(),
         title: z.string().min(1).optional(),
@@ -169,6 +204,7 @@ export function buildMcpServer(planner: Planner): McpServer {
         project: projectRef.nullable().optional(),
         waitingOn: z.string().nullable().optional(),
         followUpAt: when.nullable().optional(),
+        ...taskExtras,
       },
     },
     tool(({ id, project, ...patch }) =>
@@ -249,6 +285,7 @@ export function buildMcpServer(planner: Planner): McpServer {
     windows: z.array(timeWindow).max(14).optional().describe('When this project\'s tasks may be scheduled. Empty = working hours.'),
     windowStrict: z.boolean().optional().describe('Never fall back to working hours when the windows are full.'),
     hostMatch: z.string().nullable().optional().describe('Calendar events whose title contains this become time for this project.'),
+    links: LinksSchema.optional().describe('[{label, url}]: the project\'s doc, contract or shared folder.'),
   };
 
   server.registerTool(
@@ -292,6 +329,40 @@ export function buildMcpServer(planner: Planner): McpServer {
   );
 
   server.registerTool(
+    'get_now',
+    {
+      title: 'What\'s on now',
+      description:
+        'The block happening now (its tasks, the next unchecked step as "step n of m", links and contact), any other ' +
+        'event in progress (a shift), and the next block with minutes until it starts. Use it to nudge at the right moment.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    tool(async () => {
+      await planner.syncIfStale().catch(() => {});
+      return planner.now();
+    }),
+  );
+
+  server.registerTool(
+    'ignore_event',
+    {
+      title: 'Ignore an event for scheduling',
+      description:
+        'Have the scheduler act as if a calendar event were not there (a stale template, a duplicate gym block), for ' +
+        'that one occurrence (scope "event") or every occurrence of its repeating series ("series"). ignore false undoes ' +
+        'it. Works on events from the device calendar, which stay unchanged there. To ignore by title, set ignoreMatch ' +
+        'with update_settings; to drop a whole calendar, untick it under busy calendars in the Planner app\'s settings.',
+      inputSchema: {
+        id: z.string().describe('Event id'),
+        scope: z.enum(['event', 'series']).optional().describe('Default "event".'),
+        ignore: z.boolean().optional().describe('Default true.'),
+      },
+    },
+    tool(({ id, scope, ignore }) => planner.ignoreEvent(id, { scope: scope ?? 'event', ignore: ignore ?? true })),
+  );
+
+  server.registerTool(
     'get_settings',
     {
       title: 'Get settings',
@@ -310,8 +381,9 @@ export function buildMcpServer(planner: Planner): McpServer {
         'Change scheduling settings. workHours is a list of {days, start, end, mode?} ranges in the user\'s timezone and ' +
         'replaces the single workStart/workEnd/workDays range (send [] to go back to it); mode "quick" ranges only take ' +
         'short tasks and Quick batches, "deep" only longer work. busyMatch lists title fragments of events that always ' +
-        'block time (e.g. "Mr J\'s shift"), even all-day ones, and are never used as a project\'s host time. Each list ' +
-        'you send replaces the old one.',
+        'block time (e.g. "Mr J\'s shift"), even all-day ones, and are never used as a project\'s host time. ' +
+        'ignoreMatch lists title fragments of events the scheduler leaves out (busyMatch wins if both match). Each ' +
+        'list you send replaces the old one.',
       inputSchema: SettingsPatch.shape,
     },
     tool(async (patch) => planner.setSettings(SettingsPatch.parse(patch))),
@@ -415,7 +487,9 @@ export function buildMcpServer(planner: Planner): McpServer {
     'list_events',
     {
       title: 'List events',
-      description: 'Calendar events overlapping a time range, including task blocks (those have a taskId). Defaults to the next 7 days.',
+      description:
+        'Calendar events overlapping a time range, including task blocks (those have a taskId). Defaults to the next 7 ' +
+        'days. scheduling says whether each one blocks time: busy, free (all-day) or ignored.',
       inputSchema: { from: when.optional(), to: when.optional() },
       annotations: { readOnlyHint: true },
     },
@@ -423,7 +497,7 @@ export function buildMcpServer(planner: Planner): McpServer {
       await planner.syncIfStale().catch(() => {});
       const start = from ?? new Date().toISOString();
       const end = to ?? new Date(Date.parse(start) + 7 * 24 * 60 * 60 * 1000).toISOString();
-      return planner.listEvents({ from: start, to: end });
+      return planner.listEvents({ from: start, to: end }).map(withScheduling);
     }),
   );
 

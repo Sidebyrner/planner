@@ -65,7 +65,9 @@ Claude Code:
 claude mcp add --transport http planner https://YOUR-APP.fly.dev/mcp --header "Authorization: Bearer YOUR_MCP_TOKEN"
 ```
 
-Tools: `get_agenda`, `list_tasks`, `create_task`, `update_task`, `delete_task`, `list_events`, `create_event`, `update_event`, `delete_event`, `find_free_slots`, `propose_schedule`, `apply_schedule`, `auto_schedule`, `capture`.
+Tools: `get_agenda`, `get_now`, `list_tasks`, `create_task`, `update_task`, `delete_task`, `set_checklist`, `check_item`, `list_waiting`, `list_projects`, `create_project`, `update_project`, `get_project`, `plan_week`, `weekly_review`, `list_events`, `create_event`, `update_event`, `delete_event`, `ignore_event`, `find_free_slots`, `propose_schedule`, `apply_schedule`, `auto_schedule`, `capture`, `get_settings`, `update_settings`.
+
+Set `WEBHOOK_URL` (and optionally `WEBHOOK_SECRET`) to get a `block.started` POST as each task block begins, with the block's tasks, the next unchecked step, links and contact. The body is signed in `X-Planner-Signature: sha256=<HMAC>`.
 
 Then ask things like "what's on my plate today?", "add a 2-hour task to draft the winter menu, due Tuesday, and find time for it", or "I'm out Thursday afternoon, move my blocks".
 

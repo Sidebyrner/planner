@@ -10,6 +10,46 @@ export interface ChecklistItem {
   done: boolean;
 }
 
+/**
+ * What every occurrence of a repeating event shares. Device occurrences carry
+ * "<identifier>@<start>"; dropping the start leaves the series.
+ */
+export function seriesKey(e: Pick<CalEvent, 'id' | 'source' | 'externalId'>): string {
+  if (e.source === 'device' && e.externalId) return e.externalId.replace(/@\d{4}-\d\d-\d\dT[\d:.]+Z$/, '');
+  return e.externalId ?? e.id;
+}
+
+/** A pointer to what a task or project depends on: an email thread, a doc, a contract. */
+export interface Link {
+  label: string;
+  url: string;
+}
+
+/** The person a waiting task is on, with a way to reach them. */
+export interface Contact {
+  name: string;
+  email?: string;
+  phone?: string;
+}
+
+/** Where a task came from, so an agent can match it to its own records. */
+export type TaskSource = 'gmail' | 'claude' | 'manual';
+
+/**
+ * How a task repeats, read in the user's timezone. Completing one instance
+ * creates the next. byDay is ISO weekdays (1 = Monday); byMonthDay is 1–31
+ * (clamped to the month's length).
+ */
+export interface Recurrence {
+  freq: 'daily' | 'weekly' | 'monthly';
+  /** Every n days / weeks / months. Default 1. */
+  interval?: number;
+  byDay?: number[];
+  byMonthDay?: number[];
+  /** Hide the next instance until this many days before it is due (a bill reminder). */
+  leadTimeDays?: number;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -27,6 +67,16 @@ export interface Task {
   waitingOn: string | null;
   /** When a waiting task comes back to 'todo'. */
   followUpAt: string | null;
+  links: Link[];
+  contact: Contact | null;
+  source: TaskSource | null;
+  /** The source's own id: a Gmail thread id, a Claude doc id. */
+  externalRef: string | null;
+  recurrence: Recurrence | null;
+  /** Shared by every instance of a repeating task. */
+  seriesId: string | null;
+  /** Not shown or scheduled before this time (a repeating task's lead time). */
+  showFrom: string | null;
 }
 
 /** A weekly window, e.g. weekdays 06:45–08:15, in the user's timezone. */
@@ -66,6 +116,7 @@ export interface Project {
    * Matching events become time for this project's tasks instead of busy time.
    */
   hostMatch: string | null;
+  links: Link[];
 }
 
 export interface CalEvent {
@@ -89,6 +140,8 @@ export interface CalEvent {
    * 'device' = mirrored from the calendars on the user's Mac or iPhone (read-only here).
    */
   source: 'local' | 'google' | 'device';
+  /** Set on this one event: the scheduler treats it as if it were not there. */
+  ignored: boolean;
 }
 
 export interface Settings {
@@ -115,6 +168,10 @@ export interface Settings {
    * all-day ones, and are never used as a project's host time. E.g. "Mr J's shift".
    */
   busyMatch: string[];
+  /** Title fragments of events the scheduler ignores (a stale template, a reminder-only event). */
+  ignoreMatch: string[];
+  /** Series keys (see seriesKey) of repeating events the scheduler ignores. */
+  ignoredSeries: string[];
 }
 
 export interface ProposedBlock {

@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { CalEvent, ChecklistItem, Project, Settings, Task, TimeWindow } from '../shared/types.js';
+import type { CalEvent, ChecklistItem, Contact, Link, Project, Recurrence, Settings, Task, TimeWindow } from '../shared/types.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
@@ -57,6 +57,8 @@ export const DEFAULT_SETTINGS: Settings = {
   bufferMinEventMin: 120,
   workHours: [],
   busyMatch: [],
+  ignoreMatch: [],
+  ignoredSeries: [],
 };
 
 type Row = Record<string, any>;
@@ -84,6 +86,13 @@ const toTask = (r: Row): Task => ({
   checklist: parseJson<ChecklistItem[]>(r.checklist, []),
   waitingOn: r.waiting_on ?? null,
   followUpAt: r.follow_up_at ?? null,
+  links: parseJson<Link[]>(r.links, []),
+  contact: parseJson<Contact | null>(r.contact, null),
+  source: r.source ?? null,
+  externalRef: r.external_ref ?? null,
+  recurrence: parseJson<Recurrence | null>(r.recurrence, null),
+  seriesId: r.series_id ?? null,
+  showFrom: r.show_from ?? null,
 });
 
 const toEvent = (r: Row): CalEvent => ({
@@ -100,6 +109,7 @@ const toEvent = (r: Row): CalEvent => ({
   // Task blocks follow their task's project; see EVENT_SELECT.
   projectId: r.effective_project_id ?? r.project_id ?? null,
   taskIds: parseJson<string[]>(r.task_ids, []),
+  ignored: !!r.ignored,
 });
 
 const toProject = (r: Row): Project => ({
@@ -113,6 +123,7 @@ const toProject = (r: Row): Project => ({
   windows: parseJson<TimeWindow[]>(r.windows, []),
   windowStrict: !!r.window_strict,
   hostMatch: r.host_match ?? null,
+  links: parseJson<Link[]>(r.links, []),
 });
 
 /** Events with the project they belong to: their own, else their task's (first task for a batch). */
@@ -139,10 +150,17 @@ export function iso(value: string): string {
 }
 
 export type TaskInput = Partial<
-  Pick<Task, 'title' | 'notes' | 'priority' | 'estimateMin' | 'dueAt' | 'status' | 'projectId' | 'checklist' | 'waitingOn' | 'followUpAt'>
+  Pick<
+    Task,
+    | 'title' | 'notes' | 'priority' | 'estimateMin' | 'dueAt' | 'status' | 'projectId' | 'checklist' | 'waitingOn' | 'followUpAt'
+    | 'links' | 'contact' | 'source' | 'externalRef' | 'recurrence' | 'seriesId' | 'showFrom'
+  >
 >;
 export type EventInput = Partial<
-  Pick<CalEvent, 'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'externalId' | 'source' | 'projectId' | 'taskIds'>
+  Pick<
+    CalEvent,
+    'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'externalId' | 'source' | 'projectId' | 'taskIds' | 'ignored'
+  >
 >;
 export type ProjectInput = Partial<Omit<Project, 'id'>>;
 
@@ -164,16 +182,31 @@ export class Store {
         if (!have.includes(name)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
       }
     };
-    addColumns('events', { external_id: 'TEXT', project_id: 'TEXT', task_ids: "TEXT NOT NULL DEFAULT '[]'" });
+    addColumns('events', {
+      external_id: 'TEXT',
+      project_id: 'TEXT',
+      task_ids: "TEXT NOT NULL DEFAULT '[]'",
+      ignored: 'INTEGER NOT NULL DEFAULT 0',
+    });
     addColumns('tasks', {
       project_id: 'TEXT',
       checklist: "TEXT NOT NULL DEFAULT '[]'",
       waiting_on: 'TEXT',
       follow_up_at: 'TEXT',
+      links: "TEXT NOT NULL DEFAULT '[]'",
+      contact: 'TEXT',
+      source: 'TEXT',
+      external_ref: 'TEXT',
+      recurrence: 'TEXT',
+      series_id: 'TEXT',
+      show_from: 'TEXT',
     });
+    addColumns('projects', { links: "TEXT NOT NULL DEFAULT '[]'" });
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS events_external ON events(source, external_id) WHERE external_id IS NOT NULL;
       CREATE INDEX IF NOT EXISTS tasks_project ON tasks(project_id);
+      CREATE INDEX IF NOT EXISTS tasks_external ON tasks(source, external_ref);
+      CREATE INDEX IF NOT EXISTS tasks_series ON tasks(series_id);
     `);
   }
 
@@ -202,8 +235,8 @@ export class Store {
     const order = (this.db.prepare('SELECT COALESCE(MAX(sort_order), 0) + 1 AS n FROM projects').get() as Row).n;
     this.db
       .prepare(
-        `INSERT INTO projects (id, name, tag, color, emoji, archived, sort_order, windows, window_strict, host_match)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO projects (id, name, tag, color, emoji, archived, sort_order, windows, window_strict, host_match, links)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -216,6 +249,7 @@ export class Store {
         JSON.stringify(input.windows ?? []),
         input.windowStrict ? 1 : 0,
         input.hostMatch?.trim() || null,
+        JSON.stringify(input.links ?? []),
       );
     return this.getProject(id)!;
   }
@@ -231,7 +265,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE projects SET name = ?, tag = ?, color = ?, emoji = ?, archived = ?, sort_order = ?, windows = ?,
-         window_strict = ?, host_match = ? WHERE id = ?`,
+         window_strict = ?, host_match = ?, links = ? WHERE id = ?`,
       )
       .run(
         next.name.trim(),
@@ -243,6 +277,7 @@ export class Store {
         JSON.stringify(next.windows),
         next.windowStrict ? 1 : 0,
         next.hostMatch?.trim() || null,
+        JSON.stringify(next.links ?? []),
         id,
       );
     return this.getProject(id);
@@ -263,9 +298,17 @@ export class Store {
 
   // ---- tasks
 
-  listTasks(filter: { status?: string; projectId?: string } = {}): Task[] {
+  listTasks(filter: { status?: string; projectId?: string; externalRef?: string; seriesId?: string } = {}): Task[] {
     const where: string[] = [];
     const args: string[] = [];
+    if (filter.externalRef) {
+      where.push('external_ref = ?');
+      args.push(filter.externalRef);
+    }
+    if (filter.seriesId) {
+      where.push('series_id = ?');
+      args.push(filter.seriesId);
+    }
     if (filter.status) {
       where.push('status = ?');
       args.push(filter.status);
@@ -290,8 +333,8 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO tasks (id, title, notes, status, priority, estimate_min, due_at, created_at, completed_at,
-           project_id, checklist, waiting_on, follow_up_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           project_id, checklist, waiting_on, follow_up_at, links, contact, source, external_ref, recurrence, series_id, show_from)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -307,6 +350,13 @@ export class Store {
         JSON.stringify(input.checklist ?? []),
         input.waitingOn?.trim() || null,
         input.followUpAt ? iso(input.followUpAt) : null,
+        JSON.stringify(input.links ?? []),
+        input.contact ? JSON.stringify(input.contact) : null,
+        input.source ?? null,
+        input.externalRef?.trim() || null,
+        input.recurrence ? JSON.stringify(input.recurrence) : null,
+        input.seriesId ?? (input.recurrence ? id : null),
+        input.showFrom ? iso(input.showFrom) : null,
       );
     return this.getTask(id)!;
   }
@@ -322,7 +372,8 @@ export class Store {
     this.db
       .prepare(
         `UPDATE tasks SET title = ?, notes = ?, status = ?, priority = ?, estimate_min = ?,
-         due_at = ?, completed_at = ?, project_id = ?, checklist = ?, waiting_on = ?, follow_up_at = ? WHERE id = ?`,
+         due_at = ?, completed_at = ?, project_id = ?, checklist = ?, waiting_on = ?, follow_up_at = ?, links = ?,
+         contact = ?, source = ?, external_ref = ?, recurrence = ?, series_id = ?, show_from = ? WHERE id = ?`,
       )
       .run(
         next.title,
@@ -336,6 +387,14 @@ export class Store {
         JSON.stringify(next.checklist ?? []),
         next.waitingOn?.trim() || null,
         followUpAt,
+        JSON.stringify(next.links ?? []),
+        next.contact ? JSON.stringify(next.contact) : null,
+        next.source ?? null,
+        next.externalRef?.trim() || null,
+        next.recurrence ? JSON.stringify(next.recurrence) : null,
+        // A task that starts repeating becomes the first of its own series.
+        next.seriesId ?? (next.recurrence ? id : null),
+        next.showFrom ? iso(next.showFrom) : null,
         id,
       );
     return this.getTask(id);
@@ -424,7 +483,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE events SET title = ?, notes = ?, start_at = ?, end_at = ?, all_day = ?,
-         task_id = ?, google_id = ?, external_id = ?, source = ?, project_id = ?, task_ids = ? WHERE id = ?`,
+         task_id = ?, google_id = ?, external_id = ?, source = ?, project_id = ?, task_ids = ?, ignored = ? WHERE id = ?`,
       )
       .run(
         next.title,
@@ -438,6 +497,7 @@ export class Store {
         next.source,
         ownProject,
         JSON.stringify(next.taskIds ?? []),
+        next.ignored ? 1 : 0,
         id,
       );
     return this.getEvent(id);

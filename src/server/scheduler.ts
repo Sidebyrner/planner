@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import type { CalEvent, FreeSlot, Project, ProposedBlock, ScheduleProposal, Settings, Task, TimeWindow, WorkRange } from '../shared/types.js';
+import { seriesKey, type CalEvent, type FreeSlot, Project, type ProposedBlock, type ScheduleProposal, type Settings, type Task, type TimeWindow, type WorkRange } from '../shared/types.js';
 
 const MIN = 60_000;
 const SNAP_MIN = 15;
@@ -74,6 +74,20 @@ export function workWindows(settings: Settings, from: number, to: number, kind?:
   return windowsFrom(ranges, settings.timezone, from, to);
 }
 
+type IgnoreSettings = Pick<Settings, 'ignoreMatch' | 'ignoredSeries'>;
+
+/** Events the scheduler acts as if were not there: flagged one by one, by series, or by title. */
+export function ignoreMatcher(settings: Partial<IgnoreSettings> | undefined): (e: CalEvent) => boolean {
+  const needles = (settings?.ignoreMatch ?? []).map((m) => m.trim().toLowerCase()).filter(Boolean);
+  const series = new Set(settings?.ignoredSeries ?? []);
+  return (e) => {
+    if (isBlock(e)) return false; // Planner's own blocks always count
+    if (e.ignored || (series.size && series.has(seriesKey(e)))) return true;
+    const title = e.title.toLowerCase();
+    return needles.some((n) => title.includes(n));
+  };
+}
+
 /** Events the user marked as always busy (a shift), by title. */
 export function busyMatcher(settings: Pick<Settings, 'busyMatch'> | undefined): (e: CalEvent) => boolean {
   const needles = (settings?.busyMatch ?? []).map((m) => m.trim().toLowerCase()).filter(Boolean);
@@ -101,14 +115,18 @@ function subtract(windows: Interval[], busy: Interval[]): Interval[] {
   return out;
 }
 
-function busyFrom(events: CalEvent[], settings?: Pick<Settings, 'bufferMin' | 'bufferMinEventMin' | 'busyMatch'>): Interval[] {
+function busyFrom(
+  events: CalEvent[],
+  settings?: Pick<Settings, 'bufferMin' | 'bufferMinEventMin' | 'busyMatch'> & Partial<IgnoreSettings>,
+): Interval[] {
   const pad = (settings?.bufferMin ?? 0) * MIN;
   const longEnough = (settings?.bufferMinEventMin ?? 0) * MIN;
   const alwaysBusy = busyMatcher(settings);
+  const ignored = ignoreMatcher(settings);
   // All-day events (birthdays, holidays, out-of-office markers) don't block time,
-  // unless the user marked them as always busy.
+  // unless the user marked them as always busy. Always-busy wins over ignore.
   return events
-    .filter((e) => !e.allDay || alwaysBusy(e))
+    .filter((e) => alwaysBusy(e) || (!e.allDay && !ignored(e)))
     .map((e) => {
       const start = Date.parse(e.startAt);
       const end = Date.parse(e.endAt);
@@ -258,7 +276,9 @@ export function proposeSchedule(input: {
   const projects = new Map((input.projects ?? []).map((p) => [p.id, p]));
 
   const items = input.tasks
-    .filter((t) => t.status === 'todo' && (!input.taskIds || input.taskIds.includes(t.id)))
+    // A repeating task waiting for its lead time isn't up yet.
+    .filter((t) => t.status === 'todo' && !(t.showFrom && Date.parse(t.showFrom) > now))
+    .filter((t) => !input.taskIds || input.taskIds.includes(t.id))
     .map((t) => ({ task: t, remaining: remainingMinutes(t, events, now) }))
     .filter((q) => q.remaining > 0);
   const queue = buildWork(items, input.batch ?? true).sort(byUrgency);
@@ -270,6 +290,7 @@ export function proposeSchedule(input: {
     return generals.get(kind)!;
   };
   const alwaysBusy = busyMatcher(settings);
+  const ignored = ignoreMatcher(settings);
   const plans = new Map<string, { primary: Interval[]; fallback: Interval[] | null; busy: Interval[] }>();
   const planFor = (projectId: string | null, kind: 'deep' | 'quick') => {
     const key = `${projectId ?? ''}|${kind}`;
@@ -280,7 +301,7 @@ export function proposeSchedule(input: {
     const match = p?.hostMatch?.trim().toLowerCase();
     // An always-busy event (a shift) is never anyone's host time.
     const hosts = match
-      ? events.filter((e) => !e.allDay && !isBlock(e) && !alwaysBusy(e) && e.title.toLowerCase().includes(match))
+      ? events.filter((e) => !e.allDay && !isBlock(e) && !alwaysBusy(e) && !ignored(e) && e.title.toLowerCase().includes(match))
       : [];
     const hostIds = new Set(hosts.map((e) => e.id));
     const hostTime = hosts

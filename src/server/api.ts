@@ -12,6 +12,32 @@ export const ChecklistSchema = z
   .array(z.object({ id: z.string().min(1).max(100), text: z.string().trim().min(1).max(500), done: z.boolean() }))
   .max(100);
 
+// Only schemes that are safe to render as a link in the web app.
+export const LinkSchema = z.object({
+  label: z.string().trim().min(1).max(100),
+  url: z
+    .string()
+    .trim()
+    .max(2000)
+    .refine((u) => /^(https?:\/\/|mailto:|tel:)/i.test(u), 'Links must start with https://, http://, mailto: or tel:'),
+});
+export const LinksSchema = z.array(LinkSchema).max(20);
+export const ContactSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  email: z.string().trim().email().max(200).optional(),
+  phone: z.string().trim().min(3).max(40).optional(),
+});
+export const RecurrenceSchema = z
+  .object({
+    freq: z.enum(['daily', 'weekly', 'monthly']),
+    interval: z.number().int().min(1).max(52).optional(),
+    byDay: z.array(z.number().int().min(1).max(7)).min(1).max(7).optional(),
+    byMonthDay: z.array(z.number().int().min(1).max(31)).min(1).max(31).optional(),
+    leadTimeDays: z.number().int().min(0).max(60).optional(),
+  })
+  .refine((r) => !(r.byDay && r.freq !== 'weekly'), 'byDay only applies to weekly repeats')
+  .refine((r) => !(r.byMonthDay && r.freq !== 'monthly'), 'byMonthDay only applies to monthly repeats');
+
 const taskFields = {
   title: z.string().trim().min(1).max(300),
   notes: z.string().max(5000),
@@ -23,6 +49,11 @@ const taskFields = {
   checklist: ChecklistSchema,
   waitingOn: z.string().trim().max(100).nullable(),
   followUpAt: when.nullable(),
+  links: LinksSchema,
+  contact: ContactSchema.nullable(),
+  source: z.enum(['gmail', 'claude', 'manual']).nullable(),
+  externalRef: z.string().trim().max(500).nullable(),
+  recurrence: RecurrenceSchema.nullable(),
 };
 const TaskCreate = z.object(taskFields).partial().required({ title: true });
 const TaskPatch = z.object(taskFields).partial();
@@ -52,6 +83,7 @@ const projectFields = {
   windows: z.array(WindowSchema).max(14),
   windowStrict: z.boolean(),
   hostMatch: z.string().trim().max(100).nullable(),
+  links: LinksSchema,
 };
 const ProjectCreate = z.object(projectFields).partial().required({ name: true });
 const ProjectPatch = z.object(projectFields).partial();
@@ -90,6 +122,8 @@ export const SettingsPatch = z
     bufferMinEventMin: z.number().int().min(15).max(24 * 60),
     workHours: z.array(WorkRange).max(28),
     busyMatch: z.array(z.string().trim().min(1).max(100)).max(20),
+    ignoreMatch: z.array(z.string().trim().min(1).max(100)).max(50),
+    ignoredSeries: z.array(z.string().min(1).max(500)).max(200),
   })
   .partial();
 

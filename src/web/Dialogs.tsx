@@ -324,7 +324,7 @@ export function EventDialog(props: {
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
 type ProjectDraft = Omit<Project, 'id' | 'sortOrder' | 'archived'> & { id?: string; archived: boolean };
-const blankProject = (): ProjectDraft => ({ name: '', tag: '', color: 'teal', emoji: '', archived: false, windows: [], windowStrict: false, hostMatch: null });
+const blankProject = (): ProjectDraft => ({ name: '', tag: '', color: 'teal', emoji: '', archived: false, windows: [], windowStrict: false, hostMatch: null, links: [] });
 
 export function ProjectsDialog(props: {
   projects: Project[];

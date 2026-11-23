@@ -62,8 +62,8 @@ describe('parseCapture', () => {
 
 describe('parseCapture tags and mentions', () => {
   const projects: Project[] = [
-    { id: 'p1', name: 'Bar', tag: 'bar', color: 'amber', emoji: '', archived: false, sortOrder: 1, windows: [], windowStrict: false, hostMatch: null },
-    { id: 'p2', name: 'Freelance', tag: 'freelance', color: 'indigo', emoji: '', archived: false, sortOrder: 2, windows: [], windowStrict: false, hostMatch: null },
+    { id: 'p1', name: 'Bar', tag: 'bar', color: 'amber', emoji: '', archived: false, sortOrder: 1, windows: [], windowStrict: false, hostMatch: null, links: [] },
+    { id: 'p2', name: 'Freelance', tag: 'freelance', color: 'indigo', emoji: '', archived: false, sortOrder: 2, windows: [], windowStrict: false, hostMatch: null, links: [] },
   ];
   const t = (text: string) => parseCapture(text, { ...opts, projects });
 
