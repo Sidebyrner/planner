@@ -66,6 +66,7 @@ const toEvent = (r: Row): CalEvent => ({
   allDay: !!r.all_day,
   taskId: r.task_id,
   googleId: r.google_id,
+  externalId: r.external_id ?? null,
   source: r.source,
 });
 
@@ -77,7 +78,7 @@ export function iso(value: string): string {
 }
 
 export type TaskInput = Partial<Pick<Task, 'title' | 'notes' | 'priority' | 'estimateMin' | 'dueAt' | 'status'>>;
-export type EventInput = Partial<Pick<CalEvent, 'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'source'>>;
+export type EventInput = Partial<Pick<CalEvent, 'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'externalId' | 'source'>>;
 
 export class Store {
   readonly db: DatabaseSync;
@@ -86,6 +87,15 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  private migrate(): void {
+    const cols = (this.db.prepare('PRAGMA table_info(events)').all() as Row[]).map((c) => c.name);
+    if (!cols.includes('external_id')) this.db.exec('ALTER TABLE events ADD COLUMN external_id TEXT');
+    this.db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS events_external ON events(source, external_id) WHERE external_id IS NOT NULL',
+    );
   }
 
   // ---- tasks
@@ -158,6 +168,11 @@ export class Store {
     return r ? toEvent(r) : null;
   }
 
+  getEventByExternalId(source: CalEvent['source'], externalId: string): CalEvent | null {
+    const r = this.db.prepare('SELECT * FROM events WHERE source = ? AND external_id = ?').get(source, externalId);
+    return r ? toEvent(r) : null;
+  }
+
   getEventByGoogleId(googleId: string): CalEvent | null {
     const r = this.db.prepare('SELECT * FROM events WHERE google_id = ?').get(googleId);
     return r ? toEvent(r) : null;
@@ -170,8 +185,8 @@ export class Store {
     if (endAt <= startAt) throw new Error('An event must end after it starts.');
     this.db
       .prepare(
-        `INSERT INTO events (id, title, notes, start_at, end_at, all_day, task_id, google_id, source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO events (id, title, notes, start_at, end_at, all_day, task_id, google_id, external_id, source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -182,6 +197,7 @@ export class Store {
         input.allDay ? 1 : 0,
         input.taskId ?? null,
         input.googleId ?? null,
+        input.externalId ?? null,
         input.source ?? 'local',
       );
     return this.getEvent(id)!;
@@ -197,9 +213,9 @@ export class Store {
     this.db
       .prepare(
         `UPDATE events SET title = ?, notes = ?, start_at = ?, end_at = ?, all_day = ?,
-         task_id = ?, google_id = ?, source = ? WHERE id = ?`,
+         task_id = ?, google_id = ?, external_id = ?, source = ? WHERE id = ?`,
       )
-      .run(next.title, next.notes, startAt, endAt, next.allDay ? 1 : 0, next.taskId, next.googleId, next.source, id);
+      .run(next.title, next.notes, startAt, endAt, next.allDay ? 1 : 0, next.taskId, next.googleId, next.externalId, next.source, id);
     return this.getEvent(id);
   }
 

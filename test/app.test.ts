@@ -244,3 +244,109 @@ describe('MCP server', () => {
     expect((await client.listTools()).tools.length).toBeGreaterThan(10);
   });
 });
+
+describe('device sync (iOS and macOS apps)', () => {
+  const window = () => ({ from: inDays(-1, 0), to: inDays(30, 0) });
+  const sync = (body: Record<string, unknown>, token = 'device-token') =>
+    fetch(`${base}/api/device/events`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      body: JSON.stringify({ ...window(), events: [], ...body }),
+    }).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+
+  beforeEach(async () => {
+    server.close();
+    await start({ password: 'pw' });
+  });
+
+  it('accepts only the device token, and only when one is configured', async () => {
+    expect((await sync({})).status).toBe(401); // no DEVICE_TOKEN on this server
+    server.close();
+    await startWithDevice();
+    expect((await sync({}, 'wrong')).status).toBe(401);
+    expect((await sync({})).status).toBe(200);
+  });
+
+  async function startWithDevice() {
+    google = fakeGoogle();
+    const { app, planner } = createApp({
+      dbPath: ':memory:',
+      auth: { password: 'pw', deviceToken: 'device-token', secret: 's', secureCookies: false },
+      google: { redirectUri: 'x' },
+      fetchFn: google.fetchFn,
+    });
+    planner.setSettings({ timezone: 'UTC', workDays: [1, 2, 3, 4, 5, 6, 7], workStart: '00:00', workEnd: '23:59' });
+    server = app.listen(0);
+    base = `http://localhost:${(server.address() as AddressInfo).port}`;
+    return planner;
+  }
+
+  it('mirrors device events, updates and removes them, and keeps them read-only', async () => {
+    const planner = await startWithDevice();
+    const dentist = { externalId: 'ek-1', title: 'Dentist', startAt: inDays(1, 15), endAt: inDays(1, 16) };
+    let r = await sync({ events: [dentist, { externalId: 'ek-2', title: 'Gym', startAt: inDays(2, 7), endAt: inDays(2, 8) }] });
+    expect(r.body).toMatchObject({ upserted: 2, removed: 0, blocks: [] });
+    let mirrored = planner.listEvents().filter((e) => e.source === 'device');
+    expect(mirrored.map((e) => e.title).sort()).toEqual(['Dentist', 'Gym']);
+
+    // Moved on the phone, Gym deleted on the phone.
+    r = await sync({ events: [{ ...dentist, startAt: inDays(1, 17), endAt: inDays(1, 18) }] });
+    expect(r.body).toMatchObject({ upserted: 1, removed: 1 });
+    mirrored = planner.listEvents().filter((e) => e.source === 'device');
+    expect(mirrored).toHaveLength(1);
+    expect(mirrored[0]).toMatchObject({ title: 'Dentist', startAt: inDays(1, 17), externalId: 'ek-1' });
+
+    // Planner refuses to edit what the device owns.
+    await expect(planner.updateEvent(mirrored[0].id, { title: 'x' })).rejects.toThrow(/Change it there/);
+  });
+
+  it('schedules around device events and returns blocks for the Planner calendar', async () => {
+    const planner = await startWithDevice();
+    // Starts in the past so no sliver of time before it is free.
+    const busyStart = new Date(Math.floor(Date.now() / 3600_000) * 3600_000 - 3600_000);
+    const busyEnd = new Date(busyStart.getTime() + 30 * 86400_000);
+    // The device says the next 30 days are booked solid except a gap starting 2 days out.
+    const gap = new Date(busyStart.getTime() + 2 * 86400_000);
+    await sync({
+      events: [
+        { externalId: 'a', title: 'Busy', startAt: busyStart.toISOString(), endAt: gap.toISOString() },
+        { externalId: 'b', title: 'Busy', startAt: new Date(gap.getTime() + 3600_000).toISOString(), endAt: busyEnd.toISOString() },
+      ],
+    });
+    const task = planner.createTask({ title: 'Write report', estimateMin: 60 });
+    const { created } = await planner.autoSchedule();
+    expect(created).toHaveLength(1);
+    expect(created[0].startAt).toBe(gap.toISOString());
+
+    const r = await sync({});
+    // The mirror is now empty, but the booked block is still reported for the app to write.
+    expect(r.body.blocks).toHaveLength(1);
+    expect(r.body.blocks[0]).toMatchObject({ taskId: task.id, title: 'Write report' });
+  });
+
+  it('applies blocks the user moved or deleted in Apple Calendar', async () => {
+    const planner = await startWithDevice();
+    const task = planner.createTask({ title: 'Deep work', estimateMin: 120 });
+    const a = await planner.createEvent({ title: 'Deep work', startAt: inDays(1, 9), endAt: inDays(1, 10), taskId: task.id });
+    const b = await planner.createEvent({ title: 'Deep work', startAt: inDays(2, 9), endAt: inDays(2, 10), taskId: task.id });
+    const plain = await planner.createEvent({ title: 'Lunch', startAt: inDays(1, 12), endAt: inDays(1, 13) });
+
+    const r = await sync({
+      blockChanges: [
+        { id: a.id, startAt: inDays(1, 14), endAt: inDays(1, 15) },
+        { id: b.id, deleted: true },
+        { id: plain.id, deleted: true },
+        { id: 'gone', deleted: true },
+      ],
+    });
+    expect(r.body.blocks.map((e: any) => [e.id, e.startAt])).toEqual([[a.id, inDays(1, 14)]]);
+    expect(r.body.rejected).toEqual([{ id: plain.id, reason: 'Not a task block.' }]);
+    expect(planner.listEvents().find((e) => e.id === plain.id)).toBeTruthy();
+  });
+
+  it('rejects malformed input', async () => {
+    await startWithDevice();
+    expect((await sync({ events: [{ title: 'no id', startAt: inDays(1, 1), endAt: inDays(1, 2) }] })).status).toBe(400);
+    expect((await sync({ from: inDays(2, 0), to: inDays(1, 0) })).status).toBe(400);
+  });
+});

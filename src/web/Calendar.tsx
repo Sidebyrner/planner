@@ -227,7 +227,7 @@ export function Calendar(props: Props) {
                       key={it.key}
                       className={`block ${e.taskId ? 'is-task' : 'is-event'}${short ? ' is-short' : ''}${e.taskId && e.taskId === props.litTaskId ? ' is-lit' : ''}`}
                       style={style}
-                      draggable
+                      draggable={e.source !== 'device'}
                       title={`${e.title}, ${range}`}
                       onDragStart={(ev) => {
                         const grabMin = ((ev.clientY - ev.currentTarget.getBoundingClientRect().top) / HOUR_H) * 60;

@@ -5,6 +5,7 @@ import { findFreeSlots, proposeSchedule } from './scheduler.js';
 import type { EventInput, Store, TaskInput } from './store.js';
 
 export class NotFound extends Error {}
+export class ReadOnly extends Error {}
 
 /**
  * Everything the app can do, in one place. The web API and the MCP server
@@ -66,7 +67,7 @@ export class Planner {
 
   async createEvent(input: EventInput & { title: string; startAt: string; endAt: string }): Promise<CalEvent> {
     if (input.taskId && !this.store.getTask(input.taskId)) throw new NotFound(`No task with id ${input.taskId}`);
-    let event = this.store.createEvent({ ...input, googleId: null, source: 'local' });
+    let event = this.store.createEvent({ ...input, googleId: null, externalId: null, source: 'local' });
     await this.withGoogle(async () => {
       const googleId = await this.google.push(event);
       event = this.store.updateEvent(event.id, { googleId })!;
@@ -74,10 +75,19 @@ export class Planner {
     return event;
   }
 
-  async updateEvent(id: string, patch: EventInput): Promise<CalEvent> {
-    const { googleId: _g, source: _s, ...safe } = patch;
-    const event = this.store.updateEvent(id, safe);
+  private assertEditable(id: string): CalEvent {
+    const event = this.store.getEvent(id);
     if (!event) throw new NotFound(`No event with id ${id}`);
+    if (event.source === 'device') {
+      throw new ReadOnly('This event comes from the calendar on your Mac or iPhone. Change it there; Planner picks it up on the next sync.');
+    }
+    return event;
+  }
+
+  async updateEvent(id: string, patch: EventInput): Promise<CalEvent> {
+    this.assertEditable(id);
+    const { googleId: _g, externalId: _x, source: _s, ...safe } = patch;
+    const event = this.store.updateEvent(id, safe)!;
     await this.withGoogle(async () => {
       const googleId = await this.google.push(event);
       if (!event.googleId) this.store.updateEvent(id, { googleId });
@@ -86,8 +96,7 @@ export class Planner {
   }
 
   async deleteEvent(id: string): Promise<void> {
-    const event = this.store.getEvent(id);
-    if (!event) throw new NotFound(`No event with id ${id}`);
+    const event = this.assertEditable(id);
     this.store.deleteEvent(id);
     if (event.googleId) await this.withGoogle(() => this.google.remove(event.googleId!));
   }

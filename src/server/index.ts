@@ -24,6 +24,7 @@ const { app } = createApp({
   auth: {
     password: env.APP_PASSWORD,
     mcpToken: env.MCP_TOKEN,
+    deviceToken: env.DEVICE_TOKEN,
     secret: env.SESSION_SECRET ?? randomToken(),
     secureCookies: publicUrl.startsWith('https://'),
   },

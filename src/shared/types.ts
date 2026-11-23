@@ -23,8 +23,13 @@ export interface CalEvent {
   /** Set when this event is a time block reserved for a task. */
   taskId: string | null;
   googleId: string | null;
-  /** 'local' = created in Planner, 'google' = pulled from Google Calendar. */
-  source: 'local' | 'google';
+  /** Id the device calendar gave this event (source 'device' only). */
+  externalId: string | null;
+  /**
+   * 'local' = created in Planner, 'google' = pulled from Google Calendar,
+   * 'device' = mirrored from the calendars on the user's Mac or iPhone (read-only here).
+   */
+  source: 'local' | 'google' | 'device';
 }
 
 export interface Settings {

@@ -152,6 +152,7 @@ export function EventDialog(props: {
       <form onSubmit={onSubmit}>
         {event.taskId && <p className="hint">Time reserved for a task. Moving or removing it leaves the task itself alone.</p>}
         {event.source === 'google' && <p className="hint">From Google Calendar. Changes you save here are written back to it.</p>}
+        {event.source === 'device' && <p className="hint">From the calendar on your Mac or iPhone. Change it there; Planner picks it up on the next sync.</p>}
         <label>
           Title
           <input value={title} onChange={(e) => setTitle(e.target.value)} required autoFocus={isNew} disabled={!!event.taskId} />
@@ -176,7 +177,7 @@ export function EventDialog(props: {
         </label>
         {error && <p className="form-error">{error}</p>}
         <footer>
-          {!isNew && (
+          {!isNew && event.source !== 'device' && (
             <button type="button" className="btn btn-danger" disabled={busy} onClick={() => run(props.onDelete)}>
               {event.taskId ? 'Remove block' : 'Delete event'}
             </button>
@@ -187,9 +188,11 @@ export function EventDialog(props: {
               Mark task done
             </button>
           )}
-          <button className="btn btn-primary" disabled={busy}>
-            {isNew ? 'Add event' : 'Save changes'}
-          </button>
+          {event.source !== 'device' && (
+            <button className="btn btn-primary" disabled={busy}>
+              {isNew ? 'Add event' : 'Save changes'}
+            </button>
+          )}
         </footer>
       </form>
     </Modal>

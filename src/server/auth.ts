@@ -15,6 +15,8 @@ export interface AuthConfig {
   password?: string;
   /** Bearer token agents send to /mcp. Unset = open (local development only). */
   mcpToken?: string;
+  /** Bearer token the iOS and macOS apps send to /api. Unset = the apps can't sign in. */
+  deviceToken?: string;
   secret: string;
   secureCookies: boolean;
 }
@@ -34,6 +36,10 @@ export class Auth {
 
   isSignedIn(req: Request): boolean {
     if (!this.loginRequired) return true;
+    const header = req.headers.authorization ?? '';
+    if (header.startsWith('Bearer ')) {
+      return !!this.config.deviceToken && safeEqual(header.slice(7), this.config.deviceToken);
+    }
     const [expires, sig] = String(req.cookies?.[COOKIE] ?? '').split('.');
     const exp = Number(expires);
     return !!sig && Number.isFinite(exp) && exp > Date.now() && safeEqual(sig, this.sign(exp));

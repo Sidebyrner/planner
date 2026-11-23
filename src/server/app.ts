@@ -27,7 +27,8 @@ export function createApp(config: AppConfig): { app: Express; planner: Planner }
   const app = express();
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
-  app.use(express.json({ limit: '1mb' }));
+  // A device sync can carry a few thousand calendar events.
+  app.use(express.json({ limit: '5mb' }));
   app.use(cookieParser());
 
   app.get('/healthz', (_req, res) => void res.json({ ok: true }));

@@ -84,4 +84,4 @@ Order: 0 (Mac setup), 4 (Proxmox), 1 (server additions), 2 and 3 (apps), 5 (assi
 
 Everything except step 1 needs a Claude Code session running on the Mac: a cloud session has no Xcode, no route to the home network and none of the SSH keys. The local session asks before each command, including every SSH command to Proxmox.
 
-Step 1 is being done in the cloud session that wrote this plan. Run `git pull` before starting it; if `src/server/device.ts` exists, step 1 is done.
+Step 1 is done (`src/server/device.ts`, `PUT /api/device/events`, `DEVICE_TOKEN`; contract in the README under "Sync with the iOS and macOS apps"). Add `DEVICE_TOKEN` to `/etc/planner.env` on the Proxmox container.

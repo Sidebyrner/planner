@@ -2,7 +2,8 @@ import { Router, type NextFunction, type Request, type Response } from 'express'
 import { z } from 'zod';
 import type { AppState } from '../shared/types.js';
 import { randomToken, type Auth } from './auth.js';
-import { NotFound, type Planner } from './planner.js';
+import { DeviceSync, syncDevice } from './device.js';
+import { NotFound, ReadOnly, type Planner } from './planner.js';
 
 const when = z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'Not a valid date');
 const taskFields = {
@@ -108,6 +109,8 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     return planner.apply(blocks);
   }));
 
+  r.put('/device/events', h((req) => syncDevice(planner, DeviceSync.parse(req.body))));
+
   r.put('/settings', h((req) => planner.setSettings(SettingsPatch.parse(req.body))));
 
   // ---- Google Calendar
@@ -146,8 +149,9 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
       return void res.status(400).json({ error: err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ') });
     }
     if (err instanceof NotFound) return void res.status(404).json({ error: err.message });
+    if (err instanceof ReadOnly) return void res.status(409).json({ error: err.message });
     const message = err instanceof Error ? err.message : 'Something went wrong.';
-    const expected = /must end after|Invalid date|Google/.test(message);
+    const expected = /must end after|Invalid date|Google|sync window/.test(message);
     if (!expected) console.error(err);
     res.status(expected ? 400 : 500).json({ error: expected ? message : 'Something went wrong on the server.' });
   });

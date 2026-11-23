@@ -13,7 +13,7 @@ const task = (p: Partial<Task>): Task => ({
   dueAt: null, createdAt: `2026-11-20T00:00:0${n % 10}Z`, completedAt: null, ...p,
 });
 const event = (startAt: string, endAt: string, p: Partial<CalEvent> = {}): CalEvent => ({
-  id: `e${++n}`, title: 'Meeting', notes: '', startAt, endAt, allDay: false, taskId: null, googleId: null, source: 'local', ...p,
+  id: `e${++n}`, title: 'Meeting', notes: '', startAt, endAt, allDay: false, taskId: null, googleId: null, externalId: null, source: 'local', ...p,
 });
 
 describe('proposeSchedule', () => {
