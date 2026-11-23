@@ -60,6 +60,8 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.sidebyrner.planner
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Planner/Assets.xcassets/AppIcon; regenerate with: swift scripts/make-icon.swift
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_PREVIEWS: YES
         # macOS sandbox, with only what Planner needs.
         "ENABLE_APP_SANDBOX[sdk=macosx*]": YES
