@@ -55,6 +55,8 @@ export const DEFAULT_SETTINGS: Settings = {
   horizonDays: 14,
   bufferMin: 0,
   bufferMinEventMin: 120,
+  workHours: [],
+  busyMatch: [],
 };
 
 type Row = Record<string, any>;
@@ -472,6 +474,8 @@ export class Store {
   }
 
   setSettings(patch: Partial<Settings>): Settings {
+    // Setting a timezone on purpose is confirming it.
+    if (patch.timezone && patch.timezoneConfirmed === undefined) patch = { ...patch, timezoneConfirmed: true };
     const next = { ...this.getSettings(), ...patch };
     this.setValue('settings', next);
     return next;

@@ -92,6 +92,27 @@ describe('web API', () => {
     expect(state.events).toEqual([]);
   });
 
+  it('refuses to plan until the timezone is known, then plans once it is set', async () => {
+    const planner = await start();
+    planner.setSettings({ timezone: 'UTC', timezoneConfirmed: false });
+    await api('POST', '/api/tasks', { title: 'Write report', estimateMin: 60 });
+    const refused = await api('POST', '/api/schedule/propose');
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/timezone/);
+    await api('PUT', '/api/settings', { timezone: 'America/Detroit', timezoneConfirmed: true });
+    expect((await api('POST', '/api/schedule/propose')).status).toBe(200);
+  });
+
+  it('saves per-day working hours and busy rules, and rejects a backwards range', async () => {
+    await start();
+    const workHours = [{ days: [7, 1, 2, 3, 4], start: '09:00', end: '10:50', mode: 'quick' }];
+    const saved = (await api('PUT', '/api/settings', { workHours, busyMatch: ["Mr J's shift"] })).body;
+    expect(saved.workHours).toEqual(workHours);
+    expect(saved.busyMatch).toEqual(["Mr J's shift"]);
+    const bad = await api('PUT', '/api/settings', { workHours: [{ days: [1], start: '17:00', end: '09:00' }] });
+    expect(bad.status).toBe(400);
+  });
+
   it('rejects bad input with a readable message', async () => {
     const r = await api('POST', '/api/events', { title: 'Backwards', startAt: inDays(1, 15), endAt: inDays(1, 14) });
     expect(r.status).toBe(400);

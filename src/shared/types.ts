@@ -37,6 +37,14 @@ export interface TimeWindow {
   end: string; // "08:15"
 }
 
+/**
+ * A working-hours range. `quick` ranges only take short tasks and Quick batches
+ * (the gap before a shift); `deep` ranges only take longer work. Unset takes anything.
+ */
+export interface WorkRange extends TimeWindow {
+  mode?: 'deep' | 'quick';
+}
+
 export const PROJECT_COLORS = ['amber', 'teal', 'indigo', 'rose', 'green', 'violet', 'orange', 'slate'] as const;
 export type ProjectColor = (typeof PROJECT_COLORS)[number];
 
@@ -97,6 +105,16 @@ export interface Settings {
   bufferMin: number;
   /** Events at least this long get the buffer. */
   bufferMinEventMin: number;
+  /**
+   * Per-day working hours. When non-empty it replaces workStart/workEnd/workDays,
+   * so each day can have its own hours (or none).
+   */
+  workHours: WorkRange[];
+  /**
+   * Title fragments (case-insensitive) of events that always block time, even
+   * all-day ones, and are never used as a project's host time. E.g. "Mr J's shift".
+   */
+  busyMatch: string[];
 }
 
 export interface ProposedBlock {

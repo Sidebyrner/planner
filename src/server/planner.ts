@@ -12,6 +12,8 @@ const RELEASES_TIME = new Set<Task['status']>(['done', 'waiting']);
 
 export class NotFound extends Error {}
 export class ReadOnly extends Error {}
+/** Asked to plan time before anyone has told Planner which timezone the user is in. */
+export class TimezoneUnset extends Error {}
 
 /**
  * Everything the app can do, in one place. The web API and the MCP server
@@ -213,7 +215,21 @@ export class Planner {
 
   // ---- scheduling
 
+  /**
+   * Working hours mean nothing until the timezone is known: with the UTC default,
+   * "09:00" would book 4 AM in Detroit. Refuse instead of guessing.
+   */
+  private requireTimezone(): void {
+    if (!this.store.getSettings().timezoneConfirmed) {
+      throw new TimezoneUnset(
+        'Planner does not know your timezone yet, so working hours would be read as UTC. Open the Planner app once, ' +
+          'or set it with update_settings (e.g. timezone "America/Detroit"), then try again.',
+      );
+    }
+  }
+
   freeSlots(opts: { from?: string; to?: string; minMinutes?: number }): FreeSlot[] {
+    this.requireTimezone();
     const from = opts.from ? new Date(opts.from) : new Date();
     const to = opts.to ? new Date(opts.to) : new Date(from.getTime() + 7 * 24 * 60 * 60 * 1000);
     const events = this.store.listEvents({ from: from.toISOString(), to: to.toISOString() });
@@ -221,6 +237,7 @@ export class Planner {
   }
 
   propose(opts: { taskIds?: string[]; now?: Date } = {}): ScheduleProposal {
+    this.requireTimezone();
     const now = opts.now ?? new Date();
     return proposeSchedule({
       tasks: this.store.listTasks({ status: 'todo' }),

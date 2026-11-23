@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { PROJECT_COLORS, type AppState } from '../shared/types.js';
 import { randomToken, type Auth } from './auth.js';
 import { DeviceSync, syncDevice } from './device.js';
-import { NotFound, ReadOnly, type Planner } from './planner.js';
+import { NotFound, ReadOnly, TimezoneUnset, type Planner } from './planner.js';
 
 const when = z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'Not a valid date');
 const hm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
@@ -60,7 +60,17 @@ const Booking = z
   .object({ taskId: z.string().optional(), taskIds: z.array(z.string()).min(1).max(20).optional(), startAt: when, endAt: when })
   .refine((b) => b.taskId || b.taskIds, 'Each block needs a taskId or taskIds');
 
-const SettingsPatch = z
+const HM = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+export const WorkRange = z
+  .object({
+    days: z.array(z.number().int().min(1).max(7)).min(1),
+    start: HM,
+    end: HM,
+    mode: z.enum(['deep', 'quick']).optional(),
+  })
+  .refine((r) => r.end > r.start, 'A working-hours range must end after it starts');
+
+export const SettingsPatch = z
   .object({
     timezone: z.string().refine((tz) => {
       try {
@@ -78,6 +88,8 @@ const SettingsPatch = z
     horizonDays: z.number().int().min(1).max(60),
     bufferMin: z.number().int().min(0).max(120),
     bufferMinEventMin: z.number().int().min(15).max(24 * 60),
+    workHours: z.array(WorkRange).max(28),
+    busyMatch: z.array(z.string().trim().min(1).max(100)).max(20),
   })
   .partial();
 
@@ -191,6 +203,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     }
     if (err instanceof NotFound) return void res.status(404).json({ error: err.message });
     if (err instanceof ReadOnly) return void res.status(409).json({ error: err.message });
+    if (err instanceof TimezoneUnset) return void res.status(409).json({ error: err.message });
     const message = err instanceof Error ? err.message : 'Something went wrong.';
     const expected = /must end after|Invalid date|Google|sync window|already a project|project (needs|tag needs)/.test(message);
     if (!expected) console.error(err);

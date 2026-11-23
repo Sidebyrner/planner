@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon';
-import type { CalEvent, FreeSlot, Project, ProposedBlock, ScheduleProposal, Settings, Task, TimeWindow } from '../shared/types.js';
+import type { CalEvent, FreeSlot, Project, ProposedBlock, ScheduleProposal, Settings, Task, TimeWindow, WorkRange } from '../shared/types.js';
 
 const MIN = 60_000;
 const SNAP_MIN = 15;
@@ -59,9 +59,29 @@ export function windowsFrom(rules: TimeWindow[], zone: string, from: number, to:
   return union(out);
 }
 
-/** Working-hour windows between `from` and `to`, in the user's timezone. */
-export function workWindows(settings: Settings, from: number, to: number): Interval[] {
-  return windowsFrom([{ days: settings.workDays, start: settings.workStart, end: settings.workEnd }], settings.timezone, from, to);
+/** The working-hours ranges in force: per-day ranges if set, else the single weekly range. */
+export function workRanges(settings: Settings): WorkRange[] {
+  if (settings.workHours?.length) return settings.workHours;
+  return [{ days: settings.workDays, start: settings.workStart, end: settings.workEnd }];
+}
+
+/**
+ * Working-hour windows between `from` and `to`, in the user's timezone.
+ * With `kind`, only ranges that take that kind of work (same mode, or no mode).
+ */
+export function workWindows(settings: Settings, from: number, to: number, kind?: 'deep' | 'quick'): Interval[] {
+  const ranges = workRanges(settings).filter((r) => !kind || !r.mode || r.mode === kind);
+  return windowsFrom(ranges, settings.timezone, from, to);
+}
+
+/** Events the user marked as always busy (a shift), by title. */
+export function busyMatcher(settings: Pick<Settings, 'busyMatch'> | undefined): (e: CalEvent) => boolean {
+  const needles = (settings?.busyMatch ?? []).map((m) => m.trim().toLowerCase()).filter(Boolean);
+  if (!needles.length) return () => false;
+  return (e) => {
+    const title = e.title.toLowerCase();
+    return needles.some((n) => title.includes(n));
+  };
 }
 
 function subtract(windows: Interval[], busy: Interval[]): Interval[] {
@@ -81,12 +101,14 @@ function subtract(windows: Interval[], busy: Interval[]): Interval[] {
   return out;
 }
 
-function busyFrom(events: CalEvent[], settings?: Pick<Settings, 'bufferMin' | 'bufferMinEventMin'>): Interval[] {
+function busyFrom(events: CalEvent[], settings?: Pick<Settings, 'bufferMin' | 'bufferMinEventMin' | 'busyMatch'>): Interval[] {
   const pad = (settings?.bufferMin ?? 0) * MIN;
   const longEnough = (settings?.bufferMinEventMin ?? 0) * MIN;
-  // All-day events (birthdays, holidays, out-of-office markers) don't block time.
+  const alwaysBusy = busyMatcher(settings);
+  // All-day events (birthdays, holidays, out-of-office markers) don't block time,
+  // unless the user marked them as always busy.
   return events
-    .filter((e) => !e.allDay)
+    .filter((e) => !e.allDay || alwaysBusy(e))
     .map((e) => {
       const start = Date.parse(e.startAt);
       const end = Date.parse(e.endAt);
@@ -241,16 +263,25 @@ export function proposeSchedule(input: {
     .filter((q) => q.remaining > 0);
   const queue = buildWork(items, input.batch ?? true).sort(byUrgency);
 
-  // Where each project's work may go, worked out once per project.
-  const general = workWindows(settings, now, horizon);
+  // Where each project's work may go, worked out once per project and kind of work.
+  const generals = new Map<string, Interval[]>();
+  const generalFor = (kind: 'deep' | 'quick') => {
+    if (!generals.has(kind)) generals.set(kind, workWindows(settings, now, horizon, kind));
+    return generals.get(kind)!;
+  };
+  const alwaysBusy = busyMatcher(settings);
   const plans = new Map<string, { primary: Interval[]; fallback: Interval[] | null; busy: Interval[] }>();
-  const planFor = (projectId: string | null) => {
-    const key = projectId ?? '';
+  const planFor = (projectId: string | null, kind: 'deep' | 'quick') => {
+    const key = `${projectId ?? ''}|${kind}`;
     const cached = plans.get(key);
     if (cached) return cached;
+    const general = generalFor(kind);
     const p = projectId ? projects.get(projectId) : undefined;
     const match = p?.hostMatch?.trim().toLowerCase();
-    const hosts = match ? events.filter((e) => !e.allDay && !isBlock(e) && e.title.toLowerCase().includes(match)) : [];
+    // An always-busy event (a shift) is never anyone's host time.
+    const hosts = match
+      ? events.filter((e) => !e.allDay && !isBlock(e) && !alwaysBusy(e) && e.title.toLowerCase().includes(match))
+      : [];
     const hostIds = new Set(hosts.map((e) => e.id));
     const hostTime = hosts
       .map((e) => ({ start: Math.max(Date.parse(e.startAt), now), end: Math.min(Date.parse(e.endAt), horizon) }))
@@ -273,7 +304,8 @@ export function proposeSchedule(input: {
   const minutesIn = (s: Interval) => Math.floor((s.end - s.start) / MIN);
 
   for (const w of queue) {
-    const plan = planFor(w.projectId);
+    const kind = w.whole || w.remaining <= QUICK_TASK_MIN ? 'quick' : 'deep';
+    const plan = planFor(w.projectId, kind);
     const due = w.due;
     // Free stretches this work already has a block in, identified by where they end.
     const used = new Set<number>();

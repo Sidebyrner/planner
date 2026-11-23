@@ -173,3 +173,69 @@ describe('findFreeSlots', () => {
     ]);
   });
 });
+
+describe('timezone', () => {
+  const detroit = { ...DEFAULT_SETTINGS, timezone: 'America/Detroit', timezoneConfirmed: true };
+  it('reads a 9:00 start in the user timezone in winter and summer', () => {
+    const winter = proposeSchedule({ tasks: [task({})], events: [], settings: detroit, now: new Date('2026-11-25T12:00:00Z') });
+    expect(winter.blocks[0].startAt).toBe('2026-11-25T14:00:00.000Z'); // 09:00 EST
+    const summer = proposeSchedule({ tasks: [task({})], events: [], settings: detroit, now: new Date('2026-07-15T11:00:00Z') });
+    expect(summer.blocks[0].startAt).toBe('2026-07-15T13:00:00.000Z'); // 09:00 EDT
+  });
+});
+
+describe('per-day working hours', () => {
+  // Sun–Thu: 09:00–10:50 before the shift; Fri and Sat: 09:00–17:00. Monday 2026-11-23 in New York.
+  const shiftWeek = {
+    ...settings,
+    workHours: [
+      { days: [7, 1, 2, 3, 4], start: '09:00', end: '10:50' },
+      { days: [5, 6], start: '09:00', end: '17:00' },
+    ],
+  };
+
+  it('uses each day\'s own range and the weekend', () => {
+    const slots = findFreeSlots([], shiftWeek, { from: now, to: new Date('2026-11-29T05:00:00Z') });
+    const mon = slots.find((s) => s.startAt.startsWith('2026-11-23'))!;
+    expect(mon).toMatchObject({ startAt: '2026-11-23T14:00:00.000Z', endAt: '2026-11-23T15:50:00.000Z' });
+    const sat = slots.find((s) => s.startAt.startsWith('2026-11-28'))!;
+    expect(sat).toMatchObject({ startAt: '2026-11-28T14:00:00.000Z', endAt: '2026-11-28T22:00:00.000Z' });
+  });
+
+  it('keeps quick ranges for short work only', () => {
+    const quickGap = {
+      ...settings,
+      workHours: [
+        { days: [1], start: '09:00', end: '10:00', mode: 'quick' as const },
+        { days: [1], start: '13:00', end: '15:00', mode: 'deep' as const },
+      ],
+    };
+    const long = task({ title: 'long', estimateMin: 60 });
+    const short = task({ title: 'short', estimateMin: 15 });
+    const { blocks } = proposeSchedule({ tasks: [long, short], events: [], settings: quickGap, now });
+    expect(blocks.find((b) => b.title === 'short')!.startAt).toBe('2026-11-23T14:00:00.000Z'); // 09:00
+    expect(blocks.find((b) => b.title === 'long')!.startAt).toBe('2026-11-23T18:00:00.000Z'); // 13:00
+  });
+});
+
+describe('busyMatch', () => {
+  it('never treats a matching event as project host time', () => {
+    const shift = event('2026-11-23T15:00:00Z', '2026-11-23T20:00:00Z', { title: "Mr J's shift" });
+    const jays = project({ hostMatch: 'shift', windowStrict: true });
+    const t = task({ projectId: jays.id });
+    const hosted = proposeSchedule({ tasks: [t], events: [shift], settings, projects: [jays], now });
+    expect(hosted.blocks[0].startAt).toBe('2026-11-23T15:00:00.000Z');
+    const busy = proposeSchedule({ tasks: [t], events: [shift], settings: { ...settings, busyMatch: ["mr j's shift"] }, projects: [jays], now });
+    // With no host time left it plans in working hours, outside the shift.
+    expect(busy.blocks).toHaveLength(1);
+    expect(busy.blocks[0].endAt <= shift.startAt || busy.blocks[0].startAt >= shift.endAt).toBe(true);
+  });
+
+  it('makes a matching all-day event block the day', () => {
+    const trip = event('2026-11-23T05:00:00Z', '2026-11-24T05:00:00Z', { title: 'Trip', allDay: true });
+    const open = findFreeSlots([trip], settings, { from: now, to: new Date('2026-11-24T05:00:00Z') });
+    expect(open.length).toBeGreaterThan(0);
+    const blocked = findFreeSlots([trip], { ...settings, busyMatch: ['trip'] }, { from: now, to: new Date('2026-11-24T05:00:00Z') });
+    expect(blocked).toEqual([]);
+  });
+});

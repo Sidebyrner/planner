@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { PROJECT_COLORS, type CalEvent, type Project, type Task } from '../shared/types.js';
 import type { Planner } from './planner.js';
-import { remainingMinutes } from './scheduler.js';
+import { SettingsPatch } from './api.js';
+import { remainingMinutes, workRanges } from './scheduler.js';
 
 const when = z.string().describe('ISO 8601 timestamp with offset, e.g. 2026-11-24T14:00:00-05:00');
 const priority = z.number().int().min(1).max(3).describe('1 = low, 2 = normal, 3 = high');
@@ -94,7 +95,9 @@ export function buildMcpServer(planner: Planner): McpServer {
         now: nowIso,
         date: day.toISODate(),
         timezone: settings.timezone,
-        workingHours: { start: settings.workStart, end: settings.workEnd, isoWeekdays: settings.workDays },
+        timezoneConfirmed: settings.timezoneConfirmed,
+        workingHours: workRanges(settings).map((r) => ({ isoWeekdays: r.days, start: r.start, end: r.end, ...(r.mode ? { mode: r.mode } : {}) })),
+        busyMatch: settings.busyMatch,
         events: planner.listEvents({ from: day.toUTC().toISO()!, to: day.plus({ days: 1 }).toUTC().toISO()! }),
         openTasksByProject: [...groups.entries()].map(([id, tasks]) => ({ project: projectLabel(projects.get(id)), projectId: id || null, tasks })),
         followUps: open.filter((t) => t.waitingOn).map((t) => ({ id: t.id, title: t.title, waitingOn: t.waitingOn })),
@@ -286,6 +289,32 @@ export function buildMcpServer(planner: Planner): McpServer {
         recentlyDone: tasks.filter((t) => t.status === 'done' && t.completedAt && Date.parse(t.completedAt) > now - 14 * 86400_000),
       };
     }),
+  );
+
+  server.registerTool(
+    'get_settings',
+    {
+      title: 'Get settings',
+      description: 'Timezone, working hours (per-day ranges), always-busy title rules, block length, horizon and buffers.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+    },
+    tool(async () => planner.getSettings()),
+  );
+
+  server.registerTool(
+    'update_settings',
+    {
+      title: 'Update settings',
+      description:
+        'Change scheduling settings. workHours is a list of {days, start, end, mode?} ranges in the user\'s timezone and ' +
+        'replaces the single workStart/workEnd/workDays range (send [] to go back to it); mode "quick" ranges only take ' +
+        'short tasks and Quick batches, "deep" only longer work. busyMatch lists title fragments of events that always ' +
+        'block time (e.g. "Mr J\'s shift"), even all-day ones, and are never used as a project\'s host time. Each list ' +
+        'you send replaces the old one.',
+      inputSchema: SettingsPatch.shape,
+    },
+    tool(async (patch) => planner.setSettings(SettingsPatch.parse(patch))),
   );
 
   server.registerTool(
