@@ -64,6 +64,22 @@ struct SettingsView: View {
 
     @ViewBuilder
     private var calendarSection: some View {
+        @Bindable var model = model
+        Section {
+            Toggle("Use this device as the calendar bridge", isOn: $model.isCalendarBridge)
+        } header: {
+            Text("Calendar bridge")
+        } footer: {
+            Text("The bridge shares this device's calendars with Planner as busy time and writes booked blocks and Planner events into the \"Planner\" calendar. Turn it on for one device only, usually your Mac; iCloud carries the Planner calendar to your other devices.")
+        }
+
+        if model.isCalendarBridge {
+            busyCalendarsSection
+        }
+    }
+
+    @ViewBuilder
+    private var busyCalendarsSection: some View {
         Section {
             if model.calendarAccess {
                 let calendars = model.calendars.filter { $0.id != model.plannerCalendarID }

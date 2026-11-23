@@ -13,12 +13,18 @@ import Foundation
 @MainActor
 public final class SyncEngine {
     public struct Options: Sendable {
+        /// Whether this device is the calendar bridge: it mirrors busy time to the
+        /// server and writes Planner events into the Planner calendar. Only one
+        /// device should be, or the server's mirror flips between devices and a
+        /// shared (iCloud) Planner calendar gets duplicate events.
+        public var isCalendarBridge: Bool
         public var pastDays: Int
         public var futureDays: Int
         /// Calendars that count as busy time. nil = every calendar except Planner's.
         public var busyCalendarIDs: Set<String>?
 
-        public init(pastDays: Int = 14, futureDays: Int = 60, busyCalendarIDs: Set<String>? = nil) {
+        public init(isCalendarBridge: Bool = true, pastDays: Int = 14, futureDays: Int = 60, busyCalendarIDs: Set<String>? = nil) {
+            self.isCalendarBridge = isCalendarBridge
             self.pastDays = pastDays
             self.futureDays = futureDays
             self.busyCalendarIDs = busyCalendarIDs
@@ -78,7 +84,7 @@ public final class SyncEngine {
 
         // Without calendar access, never send an empty mirror: it would wipe the
         // server's copy of this device's events.
-        if calendar.hasAccess, let plannerID = try calendar.plannerCalendarID(create: true) {
+        if options.isCalendarBridge, calendar.hasAccess, let plannerID = try calendar.plannerCalendarID(create: true) {
             let start = now()
             let from = start.addingTimeInterval(-Double(options.pastDays) * 86_400)
             let to = start.addingTimeInterval(Double(options.futureDays) * 86_400)

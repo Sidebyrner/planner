@@ -22,12 +22,12 @@ final class SyncEngineTests: XCTestCase {
         try? FileManager.default.removeItem(at: cacheDir)
     }
 
-    func makeEngine(busy: Set<String>? = nil) -> SyncEngine {
+    func makeEngine(busy: Set<String>? = nil, bridge: Bool = true) -> SyncEngine {
         SyncEngine(
             api: PlannerAPI(baseURL: URL(string: "https://planner.test")!, token: "t", transport: stub),
             calendar: calendar,
             cache: PlannerCache(directory: cacheDir),
-            options: .init(busyCalendarIDs: busy),
+            options: .init(isCalendarBridge: bridge, busyCalendarIDs: busy),
             now: { [now] in now }
         )
     }
@@ -197,6 +197,20 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertNotNil(report.state)
         XCTAssertFalse(stub.requests.contains { $0.url?.path == "/api/device/events" },
                        "an empty mirror would wipe this device's events on the server")
+    }
+
+    func testDeviceThatIsNotTheBridgeLeavesCalendarsAlone() async throws {
+        calendar.items = [DeviceEvent(identifier: "standup", calendarID: "work", title: "Standup", start: date("2026-11-24T09:00:00Z"), end: date("2026-11-24T09:15:00Z"))]
+        serverReturns([block1])
+        let engine = makeEngine(bridge: false)
+
+        let report = try await engine.sync()
+
+        XCTAssertFalse(report.calendarSynced)
+        XCTAssertNotNil(report.state)
+        XCTAssertFalse(stub.requests.contains { $0.url?.path == "/api/device/events" })
+        XCTAssertNil(calendar.plannerID, "a non-bridge device must not create its own Planner calendar")
+        XCTAssertEqual(calendar.items.count, 1)
     }
 
     func testFailedUploadLeavesTheCalendarAlone() async throws {

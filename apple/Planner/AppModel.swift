@@ -10,6 +10,22 @@ final class AppModel {
         static let server = "serverURL"
         static let busyCalendars = "busyCalendarIDs"
         static let tokenAccount = "deviceToken"
+        static let calendarBridge = "isCalendarBridge"
+    }
+
+    /// The Mac is the bridge by default; the iPhone uses the server only.
+    #if os(macOS)
+    private static let bridgeByDefault = true
+    #else
+    private static let bridgeByDefault = false
+    #endif
+
+    /// Whether this device mirrors busy time and writes the Planner calendar. See SyncEngine.Options.
+    var isCalendarBridge: Bool {
+        didSet {
+            UserDefaults.standard.set(isCalendarBridge, forKey: Keys.calendarBridge)
+            rebuildEngine()
+        }
     }
 
     // MARK: Configuration
@@ -68,6 +84,7 @@ final class AppModel {
         self.serverURL = UserDefaults.standard.string(forKey: Keys.server) ?? ""
         self.token = Keychain.read(account: Keys.tokenAccount) ?? ""
         self.busyCalendarIDs = (UserDefaults.standard.array(forKey: Keys.busyCalendars) as? [String]).map(Set.init)
+        self.isCalendarBridge = UserDefaults.standard.object(forKey: Keys.calendarBridge) as? Bool ?? Self.bridgeByDefault
         rebuildEngine()
         state = self.cache.loadState()
         refreshCalendarInfo()
@@ -85,7 +102,7 @@ final class AppModel {
             api: PlannerAPI(baseURL: url, token: token),
             calendar: calendarStore,
             cache: cache,
-            options: .init(busyCalendarIDs: busyCalendarIDs)
+            options: .init(isCalendarBridge: isCalendarBridge, busyCalendarIDs: busyCalendarIDs)
         )
     }
 
@@ -100,7 +117,7 @@ final class AppModel {
     func start() async {
         if !started {
             started = true
-            if calendarStore is EventKitCalendarStore, !calendarStore.hasAccess, isConfigured {
+            if calendarStore is EventKitCalendarStore, isCalendarBridge, !calendarStore.hasAccess, isConfigured {
                 _ = try? await calendarStore.requestAccess()
             }
         }

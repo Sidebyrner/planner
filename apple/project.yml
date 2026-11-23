@@ -16,8 +16,9 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    # Set your team in Xcode (Signing & Capabilities) to run on an iPhone.
     CODE_SIGN_STYLE: Automatic
+    # Apple developer team used to sign for devices (Xcode > Settings > Accounts).
+    DEVELOPMENT_TEAM: H9B7A5KQP3
 
 targets:
   Planner:
