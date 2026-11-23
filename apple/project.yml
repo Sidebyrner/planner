@@ -1,0 +1,58 @@
+# Generate Planner.xcodeproj with: cd apple && xcodegen
+name: Planner
+options:
+  bundleIdPrefix: com.sidebyrner
+  deploymentTarget:
+    iOS: "17.0"
+    macOS: "14.0"
+  createIntermediateGroups: true
+
+packages:
+  PlannerKit:
+    path: PlannerKit
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Set your team in Xcode (Signing & Capabilities) to run on an iPhone.
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  Planner:
+    type: application
+    platform: auto
+    supportedDestinations: [iOS, macOS]
+    sources: [Planner]
+    dependencies:
+      - package: PlannerKit
+    info:
+      path: Planner/Info.plist
+      properties:
+        CFBundleDisplayName: Planner
+        LSApplicationCategoryType: public.app-category.productivity
+        NSCalendarsFullAccessUsageDescription: >-
+          Planner reads your calendars so it can plan tasks around your real
+          events, and adds the time blocks it books to a "Planner" calendar.
+        NSAppTransportSecurity:
+          # Lets the app reach a Planner server on localhost or the LAN during development.
+          NSAllowsLocalNetworking: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sidebyrner.planner
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_PREVIEWS: YES
+        # macOS sandbox, with only what Planner needs.
+        "ENABLE_APP_SANDBOX[sdk=macosx*]": YES
+        "ENABLE_OUTGOING_NETWORK_CONNECTIONS[sdk=macosx*]": YES
+        "ENABLE_RESOURCE_ACCESS_CALENDARS[sdk=macosx*]": YES
+        "ENABLE_HARDENED_RUNTIME[sdk=macosx*]": YES
