@@ -51,6 +51,7 @@ struct CalendarView: View {
                 proposed: model.proposal?.blocks ?? [],
                 scrollToHour: scrollHour,
                 project: { model.project(id: $0) },
+                eventProject: { model.projectFor($0) },
                 onTapProposed: { selectedProposal = $0 },
                 onTapEvent: { selectedEvent = $0 },
                 onMove: { event, start in Task { await model.move(event, to: start) } }
@@ -230,6 +231,8 @@ struct ScheduleGrid: View {
     let proposed: [ProposedBlock]
     let scrollToHour: Int
     var project: (String?) -> Project? = { _ in nil }
+    /// An event's project, including mirrored events matched by title.
+    var eventProject: (CalEvent) -> Project? = { _ in nil }
     var onTapProposed: (ProposedBlock) -> Void
     var onTapEvent: (CalEvent) -> Void
     var onMove: (CalEvent, Date) -> Void = { _, _ in }
@@ -252,6 +255,7 @@ struct ScheduleGrid: View {
                                 items: items(on: day),
                                 hourHeight: hourHeight,
                                 project: project,
+                                eventProject: eventProject,
                                 onTapProposed: onTapProposed,
                                 onTapEvent: onTapEvent,
                                 onDrop: { event, dayOffset, minutes in
@@ -306,7 +310,7 @@ struct ScheduleGrid: View {
                                 .lineLimit(1)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 4)
-                                .background((project(event.projectId)?.color.color ?? .gray).opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
+                                .background((eventProject(event)?.color.color ?? .gray).opacity(0.2), in: RoundedRectangle(cornerRadius: 4))
                                 .onTapGesture { onTapEvent(event) }
                         }
                     }
@@ -326,7 +330,7 @@ struct ScheduleGrid: View {
                     .foregroundStyle(.secondary)
                     .frame(width: gutter, height: hourHeight, alignment: .topTrailing)
                     .padding(.trailing, 6)
-                    .offset(y: -6)
+                    .padding(.top, 2)
                     .id(hour)
             }
         }
@@ -389,6 +393,7 @@ private struct DayColumn: View {
     let items: [PlacedItem]
     let hourHeight: CGFloat
     let project: (String?) -> Project?
+    let eventProject: (CalEvent) -> Project?
     var onTapProposed: (ProposedBlock) -> Void
     var onTapEvent: (CalEvent) -> Void
     /// (event, days moved, minutes moved within the day)
@@ -462,7 +467,7 @@ private struct DayColumn: View {
                 .onTapGesture { onTapProposed(p) }
                 .accessibilityAddTraits(.isButton)
         case .event(let e):
-            let proj = project(e.projectId)
+            let proj = eventProject(e)
             let tint: Color = e.isTaskBlock ? proj.tint : (proj?.color.color ?? (e.source == .device ? .gray : .purple))
             let view = label(e.title, start: e.startAt, end: e.endAt, caption: e.isBatch ? "Quick block" : e.isTaskBlock ? proj?.label ?? "Task block" : nil)
                 .background(tint.opacity(e.isTaskBlock ? 0.28 : 0.16), in: RoundedRectangle(cornerRadius: 6))

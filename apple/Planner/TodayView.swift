@@ -5,21 +5,30 @@ import SwiftUI
 struct TodayView: View {
     @Environment(AppModel.self) private var model
     @State private var openTask: PlannerTask?
+    @State private var showEarlier = false
 
     var body: some View {
+        let now = Date()
+        let earlier = model.todayEvents.filter { $0.endAt <= now }
+        let later = model.todayEvents.filter { $0.endAt > now }
         List {
             Section {
                 CaptureBar()
+            } header: {
+                Text(now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                    .textCase(nil)
             }
 
             Section {
                 TimelineView(.periodic(from: .now, by: 60)) { context in
                     VStack(spacing: 10) {
                         if let now = model.currentEvent {
-                            NowCard(label: "Now", event: now, project: model.project(id: now.projectId), at: context.date)
+                            NowCard(label: "Now", event: now, project: model.projectFor(now), at: context.date)
                         }
                         if let next = model.nextEvent {
-                            NowCard(label: "Next", event: next, project: model.project(id: next.projectId), at: context.date)
+                            NowCard(label: "Next", event: next, project: model.projectFor(next), at: context.date)
                         }
                         if model.currentEvent == nil && model.nextEvent == nil {
                             Text("Nothing else on the calendar. Press Plan to book time for open tasks.")
@@ -57,12 +66,20 @@ struct TodayView: View {
                 }
             }
 
-            Section("Today") {
-                if model.todayEvents.isEmpty {
-                    Text("A clear day.").foregroundStyle(.secondary)
+            Section("Rest of today") {
+                if later.isEmpty {
+                    Text(earlier.isEmpty ? "A clear day." : "Nothing else today.").foregroundStyle(.secondary)
                 }
-                ForEach(model.todayEvents) { event in
-                    TimelineRow(event: event, project: model.project(id: event.projectId), tasks: model.tasks(for: event))
+                ForEach(later) { event in
+                    TimelineRow(event: event, project: model.projectFor(event), tasks: model.tasks(for: event))
+                }
+                if !earlier.isEmpty {
+                    DisclosureGroup("Earlier today (\(earlier.count))", isExpanded: $showEarlier) {
+                        ForEach(earlier) { event in
+                            TimelineRow(event: event, project: model.projectFor(event), tasks: model.tasks(for: event))
+                        }
+                    }
+                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -137,7 +154,7 @@ private struct TimelineRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 56, alignment: .trailing)
             RoundedRectangle(cornerRadius: 1.5)
-                .fill(event.isTaskBlock ? project.tint : .gray)
+                .fill(project?.color.color ?? (event.isTaskBlock ? Color.accentColor : .gray))
                 .frame(width: 3)
             VStack(alignment: .leading, spacing: 2) {
                 Text(event.title).fontWeight(event.isTaskBlock ? .semibold : .regular)

@@ -227,7 +227,7 @@ struct CaptureBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("Add a task, e.g. “Write report by Friday 2h #work” or “@Sam send invoice Fri”", text: $text)
+                TextField("Add a task… #project @person", text: $text)
                     .textFieldStyle(.plain)
                     .focused($focused)
                     .onSubmit(save)

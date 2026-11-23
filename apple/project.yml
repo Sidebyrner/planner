@@ -25,13 +25,20 @@ targets:
     type: application
     platform: auto
     supportedDestinations: [iOS, macOS]
-    sources: [Planner]
+    sources:
+      - path: Planner
+        excludes: ["*.entitlements"]
+      - Shared
     dependencies:
       - package: PlannerKit
+      - target: PlannerWidget
+        destinationFilters: [iOS]
     info:
       path: Planner/Info.plist
       properties:
         CFBundleDisplayName: Planner
+        # Keychain group shared with the widget (see Shared/Keychain.swift).
+        PlannerKeychainGroup: $(AppIdentifierPrefix)com.sidebyrner.planner.shared
         LSApplicationCategoryType: public.app-category.productivity
         NSCalendarsFullAccessUsageDescription: >-
           Planner reads your calendars so it can plan tasks around your real
@@ -57,3 +64,31 @@ targets:
         "ENABLE_OUTGOING_NETWORK_CONNECTIONS[sdk=macosx*]": YES
         "ENABLE_RESOURCE_ACCESS_CALENDARS[sdk=macosx*]": YES
         "ENABLE_HARDENED_RUNTIME[sdk=macosx*]": YES
+        # iOS only: the Keychain group shared with the widget.
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]": Planner/Planner-iOS.entitlements
+        "CODE_SIGN_ENTITLEMENTS[sdk=iphonesimulator*]": Planner/Planner-iOS.entitlements
+
+  PlannerWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - PlannerWidget
+      - Shared
+      - Planner/Format.swift
+      - Planner/Theme.swift
+    dependencies:
+      - package: PlannerKit
+    info:
+      path: PlannerWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Planner
+        PlannerKeychainGroup: $(AppIdentifierPrefix)com.sidebyrner.planner.shared
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.sidebyrner.planner.widget
+        CODE_SIGN_ENTITLEMENTS: PlannerWidget/PlannerWidget.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SKIP_INSTALL: YES

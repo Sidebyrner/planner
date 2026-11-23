@@ -24,6 +24,34 @@ extension Optional where Wrapped == Project {
     var tint: Color { self?.color.color ?? .accentColor }
 }
 
+/// Seven equal circles, Monday first. ISO weekdays (1 = Monday) in and out.
+struct WeekdayPicker: View {
+    @Binding var days: [Int]
+    private static let letters = ["M", "T", "W", "T", "F", "S", "S"]
+    private static let names = Calendar.current.weekdaySymbols // Sunday first
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(1...7, id: \.self) { day in
+                let on = days.contains(day)
+                Button {
+                    days = on ? days.filter { $0 != day } : (days + [day]).sorted()
+                } label: {
+                    Text(Self.letters[day - 1])
+                        .font(.callout.weight(.semibold))
+                        .frame(width: 36, height: 36)
+                        .foregroundStyle(on ? Color.white : Color.primary)
+                        .background(on ? Color.accentColor : Color.secondary.opacity(0.15), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel(Self.names[day % 7])
+                .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+            }
+        }
+    }
+}
+
 /// A small coloured capsule naming a project.
 struct ProjectChip: View {
     let project: Project

@@ -42,13 +42,14 @@ final class AppModel {
     var serverURL: String {
         didSet {
             UserDefaults.standard.set(serverURL, forKey: Keys.server)
+            SharedCredentials.serverURL = serverURL
             rebuildEngine()
         }
     }
 
     var token: String {
         didSet {
-            Keychain.write(token.isEmpty ? nil : token, account: Keys.tokenAccount)
+            SharedCredentials.token = token
             rebuildEngine()
         }
     }
@@ -91,7 +92,19 @@ final class AppModel {
             ?? (try? PlannerCache.standard())
             ?? PlannerCache(directory: FileManager.default.temporaryDirectory.appending(path: "Planner"))
         self.serverURL = UserDefaults.standard.string(forKey: Keys.server) ?? ""
-        self.token = Keychain.read(account: Keys.tokenAccount) ?? ""
+        var storedToken = SharedCredentials.token ?? ""
+        // Keep the shared copy of the address current for Siri and the widget.
+        if let saved = UserDefaults.standard.string(forKey: Keys.server), SharedCredentials.serverURL != saved {
+            SharedCredentials.serverURL = saved
+        }
+        #if DEBUG
+        // Simulator screenshots: an unsigned build can't read the Keychain item saved by a signed one,
+        // so allow the token from the launch environment. Compiled out of release builds.
+        if storedToken.isEmpty, let injected = ProcessInfo.processInfo.environment["PLANNER_DEVICE_TOKEN"], !injected.isEmpty {
+            storedToken = injected
+        }
+        #endif
+        self.token = storedToken
         self.busyCalendarIDs = (UserDefaults.standard.array(forKey: Keys.busyCalendars) as? [String]).map(Set.init)
         self.isCalendarBridge = UserDefaults.standard.object(forKey: Keys.calendarBridge) as? Bool ?? Self.bridgeByDefault
         self.remindersEnabled = UserDefaults.standard.bool(forKey: Keys.reminders)
@@ -141,10 +154,20 @@ final class AppModel {
         do {
             let report = try await engine.sync()
             if let state = report.state { self.state = state }
+            // A server nobody has confirmed a time zone on plans in UTC. Adopt this device's,
+            // the same way the web app does on first visit.
+            if let settings = report.state?.settings, !settings.timezoneConfirmed {
+                _ = try? await engine.api.updateSettings(SettingsPatch(timezone: TimeZone.current.identifier, timezoneConfirmed: true))
+                if let fresh = try? await engine.api.state() { self.state = fresh }
+            }
             rejectedMoves = report.rejected
             lastSyncAt = Date()
             await refreshReminders(requestPermission: false)
             syncError = nil
+            suggestedServer = nil
+        } catch PlannerAPIError.notPlanner {
+            syncError = PlannerAPIError.notPlanner.localizedDescription
+            if suggestedServer == nil { suggestedServer = await alternativeServer() }
         } catch {
             syncError = error.localizedDescription
         }
@@ -166,17 +189,6 @@ final class AppModel {
         }
         refreshCalendarInfo()
         await sync()
-    }
-
-    func testConnection() async -> String {
-        guard let api = engine?.api else { return "Add the server address and device token first." }
-        do {
-            guard try await api.health() else { return "The server answered but is not healthy." }
-            let state = try await api.state()
-            return "Connected. \(state.tasks.filter { !$0.isDone }.count) open tasks."
-        } catch {
-            return error.localizedDescription
-        }
     }
 
     // MARK: Actions
@@ -287,7 +299,65 @@ final class AppModel {
         return state?.tasks.first { $0.id == id }
     }
 
+    // MARK: Connection
+
+    /// Set when the saved address answers but isn't the Planner app and the :8443 address is.
+    private(set) var suggestedServer: String?
+
+    var serverHost: String? {
+        URL(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines))?.host()
+    }
+
+    func useSuggestedServer() {
+        guard let suggestion = suggestedServer else { return }
+        serverURL = suggestion
+        suggestedServer = nil
+        Task { await sync() }
+    }
+
+    /// Checks the address and token, fixing a missing :8443 on the way. Returns a problem to show, or nil.
+    func connect() async -> String? {
+        guard let api = engine?.api else { return "Enter an https:// address and the device token." }
+        do {
+            guard try await api.health() else { return "The server answered but isn't healthy." }
+            _ = try await api.state()
+        } catch PlannerAPIError.notPlanner {
+            if let fixed = await alternativeServer() {
+                serverURL = fixed
+                suggestedServer = nil
+                return await connect()
+            }
+            return PlannerAPIError.notPlanner.localizedDescription
+        } catch {
+            return error.localizedDescription
+        }
+        await start()
+        return nil
+    }
+
+    /// With Tailscale Funnel, :443 serves only /mcp and the app is on :8443. Try that.
+    private func alternativeServer() async -> String? {
+        guard var parts = URLComponents(string: serverURL.trimmingCharacters(in: .whitespacesAndNewlines)), parts.port == nil else { return nil }
+        parts.port = 8443
+        parts.path = ""
+        guard let url = parts.url else { return nil }
+        let probe = PlannerAPI(baseURL: url, token: token)
+        return (try? await probe.health()) == true ? url.absoluteString : nil
+    }
+
     // MARK: Projects
+
+    /// The project an event belongs to: its own, or for a mirrored event the project whose
+    /// host text it contains or whose name it starts with ("Mr J's shift" → Mr J's).
+    func projectFor(_ event: CalEvent) -> Project? {
+        if let p = project(id: event.projectId) { return p }
+        guard event.source != .local else { return nil }
+        let title = event.title.lowercased()
+        return liveProjects.first { p in
+            if let match = p.hostMatch?.lowercased(), !match.isEmpty, title.contains(match) { return true }
+            return title.hasPrefix(p.name.lowercased())
+        }
+    }
 
     var projects: [Project] { (state?.projects ?? []).sorted { ($0.sortOrder, $0.name) < ($1.sortOrder, $1.name) } }
     var liveProjects: [Project] { projects.filter { !$0.archived } }

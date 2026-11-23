@@ -42,6 +42,26 @@ final class PlannerAPITests: XCTestCase {
         }
     }
 
+    func testBare404MeansTheAddressIsWrong() async {
+        let stub = StubTransport()
+        stub.on("GET", "/api/state") { _ in (404, "404 page not found") }
+        stub.on("DELETE", "/api/tasks/gone") { _ in (404, #"{"error":"No task with id gone"}"#) }
+        let api = PlannerAPI(baseURL: base, token: "t", transport: stub)
+
+        do {
+            _ = try await api.state()
+            XCTFail("expected an error")
+        } catch {
+            XCTAssertEqual(error as? PlannerAPIError, .notPlanner)
+        }
+        do {
+            try await api.deleteTask(id: "gone")
+            XCTFail("expected an error")
+        } catch {
+            XCTAssertEqual(error as? PlannerAPIError, .server(status: 404, message: "No task with id gone"))
+        }
+    }
+
     func testServerErrorCarriesTheServerMessage() async {
         let stub = StubTransport()
         stub.on("POST", "/api/tasks") { _ in (400, #"{"error":"title: Too small"}"#) }

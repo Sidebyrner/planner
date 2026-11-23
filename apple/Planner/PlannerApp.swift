@@ -31,9 +31,11 @@ struct PlannerApp: App {
 
         #if os(macOS)
         SwiftUI.Settings {
-            SettingsView()
-                .environment(model)
-                .frame(width: 520, height: 640)
+            NavigationStack {
+                SettingsView()
+            }
+            .environment(model)
+            .frame(width: 520, height: 640)
         }
         #endif
     }

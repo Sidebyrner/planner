@@ -3,6 +3,9 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    /// Opening tab. A launch argument like `-PlannerTab calendar` lands in UserDefaults, which
+    /// is how screenshots and Siri ("What's next") open a specific screen.
+    @State private var tab = UserDefaults.standard.string(forKey: "PlannerTab") ?? "today"
 
     var body: some View {
         @Bindable var model = model
@@ -29,41 +32,33 @@ struct ContentView: View {
             SidebarView()
                 .navigationSplitViewColumnWidth(min: 320, ideal: 360)
         } detail: {
-            VStack(spacing: 0) {
-                SyncBanner()
-                CalendarView()
-            }
+            CalendarView().syncBanner()
         }
         #else
-        TabView {
+        TabView(selection: $tab) {
             NavigationStack {
-                VStack(spacing: 0) {
-                    SyncBanner()
-                    TodayView()
-                }
+                TodayView().syncBanner()
             }
             .tabItem { Label("Today", systemImage: "sun.max") }
+            .tag("today")
 
             NavigationStack {
-                VStack(spacing: 0) {
-                    SyncBanner()
-                    TaskListView()
-                }
+                TaskListView().syncBanner()
             }
             .tabItem { Label("Tasks", systemImage: "checklist") }
+            .tag("tasks")
 
             NavigationStack {
-                VStack(spacing: 0) {
-                    SyncBanner()
-                    CalendarView()
-                }
+                CalendarView().syncBanner()
             }
             .tabItem { Label("Calendar", systemImage: "calendar") }
+            .tag("calendar")
 
             NavigationStack {
                 SettingsView()
             }
             .tabItem { Label("Settings", systemImage: "gear") }
+            .tag("settings")
         }
         #endif
     }
@@ -93,25 +88,71 @@ struct SidebarView: View {
 }
 #endif
 
-/// Shown when the last sync failed or the server changed a block back.
+/// A compact pill above the tab bar when the last sync failed or the server put a block back.
 struct SyncBanner: View {
     @Environment(AppModel.self) private var model
+    @State private var expanded = false
 
     var body: some View {
         if let error = model.syncError {
-            banner(systemImage: "wifi.exclamationmark", text: "Can't reach Planner. Showing what was saved\(model.lastSyncAt.map { " at \(Format.time($0))" } ?? ""). \(error)")
+            pill(
+                systemImage: "wifi.exclamationmark",
+                title: "Not synced",
+                detail: error,
+                action: model.suggestedServer != nil ? ("Use :8443", useSuggestion) : ("Retry", retry)
+            )
         } else if !model.rejectedMoves.isEmpty {
-            banner(systemImage: "arrow.uturn.backward", text: "Planner put \(model.rejectedMoves.count == 1 ? "a block" : "\(model.rejectedMoves.count) blocks") back: \(model.rejectedMoves.map(\.reason).joined(separator: " "))")
+            pill(
+                systemImage: "arrow.uturn.backward",
+                title: "Planner put \(model.rejectedMoves.count == 1 ? "a block" : "\(model.rejectedMoves.count) blocks") back",
+                detail: model.rejectedMoves.map(\.reason).joined(separator: " "),
+                action: nil
+            )
         }
     }
 
-    private func banner(systemImage: String, text: String) -> some View {
-        Label(text, systemImage: systemImage)
-            .font(.callout)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(.orange.opacity(0.15))
+    private func useSuggestion() {
+        model.useSuggestedServer()
+    }
+
+    private func retry() {
+        Task { await model.sync() }
+    }
+
+    private func pill(systemImage: String, title: String, detail: String, action: (String, () -> Void)?) -> some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: systemImage).foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.subheadline.weight(.semibold))
+                if expanded {
+                    Text(detail).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 4)
+            if let action {
+                Button(action.0, action: action.1)
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.orange.opacity(0.35)))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+        .contentShape(Rectangle())
+        .onTapGesture { withAnimation { expanded.toggle() } }
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Shows the details")
+    }
+}
+
+extension View {
+    /// Puts the sync status pill along the bottom edge, out of the way of titles.
+    func syncBanner() -> some View {
+        safeAreaInset(edge: .bottom, spacing: 0) { SyncBanner() }
     }
 }
 

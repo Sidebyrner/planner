@@ -47,6 +47,7 @@ struct ProjectsView: View {
                 }
             }
         }
+        .formStyle(.grouped)
         .navigationTitle("Projects")
         .sheet(item: $editing) { ProjectEditor(project: $0) }
         .sheet(isPresented: $adding) { ProjectEditor(project: nil) }
@@ -178,38 +179,23 @@ private struct WindowEditor: View {
     @Binding var window: TimeWindow
     var onRemove: () -> Void
 
-    private static let names = ["M", "T", "W", "T", "F", "S", "S"]
-    private static let times: [String] = (0..<96).map { String(format: "%02d:%02d", $0 / 4, ($0 % 4) * 15) }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 4) {
-                ForEach(1...7, id: \.self) { day in
-                    let on = window.days.contains(day)
-                    Button(Self.names[day - 1]) {
-                        window.days = on ? window.days.filter { $0 != day } : (window.days + [day]).sorted()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(on ? .accentColor : .secondary)
-                    .accessibilityAddTraits(on ? .isSelected : [])
-                }
+            HStack {
+                Text("\(Format.weekdays(window.days)), \(Format.clock(window.start))–\(Format.clock(window.end))")
+                    .font(.subheadline.weight(.semibold))
                 Spacer()
-                Button(role: .destructive, action: onRemove) { Image(systemName: "minus.circle") }
+                Button(role: .destructive, action: onRemove) { Image(systemName: "minus.circle.fill") }
                     .buttonStyle(.plain)
                     .foregroundStyle(.red)
                     .accessibilityLabel("Remove these hours")
             }
+            WeekdayPicker(days: $window.days)
             HStack {
-                Picker("From", selection: $window.start) { options(window.start) }
-                Picker("Until", selection: $window.end) { options(window.end) }
+                Picker("From", selection: $window.start) { TimeOptions(current: window.start) }
+                Picker("Until", selection: $window.end) { TimeOptions(current: window.end) }
             }
         }
         .padding(.vertical, 4)
-    }
-
-    @ViewBuilder
-    private func options(_ current: String) -> some View {
-        let list = Self.times.contains(current) ? Self.times : (Self.times + [current]).sorted()
-        ForEach(list, id: \.self) { Text($0).tag($0) }
     }
 }

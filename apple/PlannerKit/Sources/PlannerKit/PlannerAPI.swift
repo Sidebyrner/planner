@@ -23,12 +23,15 @@ public enum PlannerAPIError: Error, Equatable, LocalizedError {
     /// The server answered with an error; `message` is its `error` field.
     case server(status: Int, message: String)
     case invalidResponse
+    /// Something answered at this address, but it isn't the Planner app (a plain 404).
+    case notPlanner
 
     public var errorDescription: String? {
         switch self {
-        case .unauthorized: "The server did not accept the device token. Check it in Settings."
+        case .unauthorized: "The server didn't accept the device token. Check it in Settings."
         case let .server(_, message): message
-        case .invalidResponse: "The server sent a response Planner could not read."
+        case .invalidResponse: "The server sent a response Planner couldn't read."
+        case .notPlanner: "That address isn't the Planner app. Check the server address in Settings."
         }
     }
 }
@@ -158,8 +161,10 @@ public struct PlannerAPI: Sendable {
         guard let http = response as? HTTPURLResponse else { throw PlannerAPIError.invalidResponse }
         if http.statusCode == 401 { throw PlannerAPIError.unauthorized }
         guard (200..<300).contains(http.statusCode) else {
-            let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
-                ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            let serverMessage = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
+            // Planner's own 404s ("No task with id …") carry a message; a bare one means a wrong address.
+            if http.statusCode == 404 && serverMessage == nil { throw PlannerAPIError.notPlanner }
+            let message = serverMessage ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
             throw PlannerAPIError.server(status: http.statusCode, message: message)
         }
         do {

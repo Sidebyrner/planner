@@ -1,130 +1,315 @@
 import PlannerKit
 import SwiftUI
 
+/// Settings overview: connection status at the top, each area one tap away.
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
     var onboarding = false
-    @State private var connectionStatus: String?
-    @State private var testing = false
-    @State private var showProjects = false
+
+    var body: some View {
+        if onboarding {
+            ConnectView()
+        } else {
+            overview
+        }
+    }
+
+    private var overview: some View {
+        @Bindable var model = model
+        return Form {
+            Section {
+                NavigationLink {
+                    ServerSettingsView()
+                } label: {
+                    ConnectionStatusRow()
+                }
+                if let suggestion = model.suggestedServer {
+                    Button("Use \(suggestion)") { model.useSuggestedServer() }
+                }
+            }
+
+            Section("Planning") {
+                NavigationLink {
+                    ProjectsView()
+                } label: {
+                    LabeledContent {
+                        Text("\(model.liveProjects.count)")
+                    } label: {
+                        Label("Projects", systemImage: "folder")
+                    }
+                }
+                NavigationLink {
+                    SchedulingSettingsView()
+                } label: {
+                    LabeledContent {
+                        Text(schedulingSummary)
+                    } label: {
+                        Label("Scheduling", systemImage: "clock")
+                    }
+                }
+                .disabled(model.state == nil)
+            }
+
+            Section {
+                NavigationLink {
+                    CalendarSettingsView()
+                } label: {
+                    LabeledContent {
+                        Text(model.isCalendarBridge ? "This device" : "Another device")
+                    } label: {
+                        Label("Calendars", systemImage: "calendar")
+                    }
+                }
+                Toggle(isOn: $model.remindersEnabled) {
+                    Label("Reminders", systemImage: "bell")
+                }
+                #if os(iOS)
+                NavigationLink {
+                    SiriSettingsView()
+                } label: {
+                    Label("Siri & Shortcuts", systemImage: "waveform")
+                }
+                #endif
+            } footer: {
+                Text("Reminders: a notification when a booked block starts and when a follow-up is due.")
+            }
+
+            Section {
+                Button {
+                    Task { await model.sync() }
+                } label: {
+                    HStack {
+                        Text("Sync Now")
+                        Spacer()
+                        if model.isSyncing { ProgressView().controlSize(.small) }
+                    }
+                }
+                .disabled(!model.isConfigured || model.isSyncing)
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Settings")
+    }
+
+    private var schedulingSummary: String {
+        guard let s = model.state?.settings else { return "" }
+        return "\(Format.weekdays(s.workDays)) \(Format.clock(s.workStart))–\(Format.clock(s.workEnd))"
+    }
+}
+
+/// Green, orange or red dot with what's going on with the server connection.
+struct ConnectionStatusRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(color)
+                .frame(width: 10, height: 10)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.serverHost ?? "Not connected")
+                    .font(.body.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(model.syncError == nil ? Color.secondary : Color.red)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var color: Color {
+        if !model.isConfigured || model.syncError != nil { return .red }
+        return model.lastSyncAt == nil ? .orange : .green
+    }
+
+    private var detail: String {
+        if !model.isConfigured { return "Add the server address and device token" }
+        if let error = model.syncError { return error }
+        if let last = model.lastSyncAt { return "Synced \(last.formatted(.relative(presentation: .named)))" }
+        return "Connecting…"
+    }
+}
+
+// MARK: - First run
+
+/// Just what's needed to connect: address, token, Connect.
+struct ConnectView: View {
+    @Environment(AppModel.self) private var model
+    @State private var connecting = false
+    @State private var result: String?
 
     var body: some View {
         @Bindable var model = model
         Form {
-            if onboarding {
-                Section {
-                    Text("Connect to your Planner server. You'll find the device token as DEVICE_TOKEN in /etc/planner.env on the server.")
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 40))
+                        .foregroundStyle(Color.accentColor)
+                    Text("Connect to your Planner")
+                        .font(.title2.weight(.bold))
+                    Text("Enter the address of your Planner server and this device's token.")
                         .foregroundStyle(.secondary)
                 }
+                .padding(.vertical, 8)
             }
 
-            Section("Server") {
-                TextField("Address", text: $model.serverURL, prompt: Text("https://planner.your-tailnet.ts.net"))
+            Section {
+                TextField("Server address", text: $model.serverURL, prompt: Text("https://planner.your-tailnet.ts.net:8443"))
+                    .autocorrectionDisabled()
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .textContentType(.URL)
+                    #endif
+                HStack {
+                    SecureField("Device token", text: $model.token)
+                    PasteButton(payloadType: String.self) { strings in
+                        if let pasted = strings.first?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                            model.token = pasted.replacingOccurrences(of: "DEVICE_TOKEN=", with: "")
+                        }
+                    }
+                    .labelStyle(.iconOnly)
+                    .buttonBorderShape(.capsule)
+                }
+            } footer: {
+                Text("The token is DEVICE_TOKEN in the server's planner.env. It's stored in your Keychain.")
+            }
+
+            Section {
+                Button {
+                    connecting = true
+                    Task {
+                        result = await model.connect()
+                        connecting = false
+                    }
+                } label: {
+                    HStack {
+                        Spacer()
+                        if connecting { ProgressView().controlSize(.small) } else { Text("Connect").bold() }
+                        Spacer()
+                    }
+                }
+                .disabled(connecting || model.serverURL.isEmpty || model.token.isEmpty)
+                if let result {
+                    Label(result, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                        .font(.callout)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Set Up")
+    }
+}
+
+// MARK: - Server
+
+struct ServerSettingsView: View {
+    @Environment(AppModel.self) private var model
+    @State private var status: String?
+    @State private var testing = false
+
+    var body: some View {
+        @Bindable var model = model
+        Form {
+            Section {
+                ConnectionStatusRow()
+            }
+            Section {
+                TextField("Server address", text: $model.serverURL, prompt: Text("https://planner.your-tailnet.ts.net:8443"))
                     .autocorrectionDisabled()
                     #if os(iOS)
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                     #endif
-                SecureField("Device token", text: $model.token)
                 HStack {
-                    Button("Test Connection") {
-                        testing = true
-                        Task {
-                            connectionStatus = await model.testConnection()
-                            testing = false
+                    SecureField("Device token", text: $model.token)
+                    PasteButton(payloadType: String.self) { strings in
+                        if let pasted = strings.first?.trimmingCharacters(in: .whitespacesAndNewlines) {
+                            model.token = pasted.replacingOccurrences(of: "DEVICE_TOKEN=", with: "")
                         }
                     }
-                    .disabled(testing)
-                    if testing { ProgressView().controlSize(.small) }
+                    .labelStyle(.iconOnly)
+                    .buttonBorderShape(.capsule)
                 }
-                if let connectionStatus {
-                    Text(connectionStatus).font(.callout).foregroundStyle(.secondary)
-                }
-            }
-
-            calendarSection
-
-            if let settings = model.state?.settings {
-                WorkingHoursSection(settings: settings)
-            }
-
-            Section("Planning") {
                 Button {
-                    showProjects = true
+                    testing = true
+                    Task {
+                        status = await model.connect() ?? "Connected."
+                        testing = false
+                    }
                 } label: {
-                    LabeledContent("Projects", value: "\(model.liveProjects.count)")
+                    HStack {
+                        Text("Test Connection")
+                        Spacer()
+                        if testing { ProgressView().controlSize(.small) }
+                    }
                 }
-                .disabled(!model.isConfigured)
-                Toggle("Remind me when blocks start and follow-ups are due", isOn: $model.remindersEnabled)
-            }
-
-            Section("Sync") {
-                if let last = model.lastSyncAt {
-                    LabeledContent("Last sync", value: Format.relative(last))
+                .disabled(testing)
+                if let status {
+                    Text(status).font(.callout).foregroundStyle(.secondary)
                 }
-                if let error = model.syncError {
-                    Text(error).foregroundStyle(.red)
-                }
-                Button("Sync Now") { Task { await model.sync() } }
-                    .disabled(!model.isConfigured || model.isSyncing)
+            } footer: {
+                Text("With Tailscale Funnel on, the app lives on port 8443 and only /mcp is public.")
             }
         }
         .formStyle(.grouped)
-        .navigationTitle(onboarding ? "Set Up Planner" : "Settings")
-        .sheet(isPresented: $showProjects) {
-            NavigationStack {
-                ProjectsView()
-                    .toolbar {
-                        ToolbarItem(placement: .confirmationAction) { Button("Done") { showProjects = false } }
-                    }
-            }
-            #if os(macOS)
-            .frame(minWidth: 480, minHeight: 480)
-            #endif
-        }
+        .navigationTitle("Server")
     }
+}
 
-    @ViewBuilder
-    private var calendarSection: some View {
+// MARK: - Calendars
+
+struct CalendarSettingsView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
         @Bindable var model = model
-        Section {
-            Toggle("Use this device as the calendar bridge", isOn: $model.isCalendarBridge)
-        } header: {
-            Text("Calendar bridge")
-        } footer: {
-            Text("The bridge shares this device's calendars with Planner as busy time and writes booked blocks and Planner events into the \"Planner\" calendar. Turn it on for one device only, usually your Mac; iCloud carries the Planner calendar to your other devices.")
-        }
+        Form {
+            Section {
+                Picker("Calendar sync runs on", selection: $model.isCalendarBridge) {
+                    Text("This device").tag(true)
+                    Text("Another device").tag(false)
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text("Calendar sync runs on")
+            } footer: {
+                Text("One device shares your calendars with Planner as busy time and writes booked blocks into a \"Planner\" calendar. Use your Mac; iCloud brings that calendar to your other devices.")
+            }
 
-        if model.isCalendarBridge {
-            busyCalendarsSection
-        }
-    }
-
-    @ViewBuilder
-    private var busyCalendarsSection: some View {
-        Section {
-            if model.calendarAccess {
-                let calendars = model.calendars.filter { $0.id != model.plannerCalendarID }
-                ForEach(calendars) { calendar in
-                    Toggle(isOn: busyBinding(calendar.id)) {
-                        VStack(alignment: .leading) {
-                            Text(calendar.title)
-                            Text(calendar.source).font(.caption).foregroundStyle(.secondary)
+            if model.isCalendarBridge {
+                Section {
+                    if model.calendarAccess {
+                        ForEach(model.calendars.filter { $0.id != model.plannerCalendarID }) { calendar in
+                            Toggle(isOn: busyBinding(calendar.id)) {
+                                VStack(alignment: .leading) {
+                                    Text(calendar.title)
+                                    Text(calendar.source).font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
                         }
+                    } else {
+                        Text("Planner needs calendar access to plan around your events.")
+                            .foregroundStyle(.secondary)
+                        Button("Allow Calendar Access") { Task { await model.requestCalendarAccess() } }
+                    }
+                } header: {
+                    Text("Count as busy")
+                } footer: {
+                    if model.calendarAccess {
+                        Text("Turn a calendar off if its events shouldn't block time.")
                     }
                 }
-            } else {
-                Text("Planner needs calendar access to plan around your events and to add booked blocks to a \"Planner\" calendar.")
-                    .foregroundStyle(.secondary)
-                Button("Allow Calendar Access") { Task { await model.requestCalendarAccess() } }
-            }
-        } header: {
-            Text("Calendars that count as busy")
-        } footer: {
-            if model.calendarAccess {
-                Text("Booked blocks go into the \"Planner\" calendar. Turn a calendar off if its events shouldn't block time.")
             }
         }
+        .formStyle(.grouped)
+        .navigationTitle("Calendars")
     }
 
     private func busyBinding(_ id: String) -> Binding<Bool> {
@@ -138,8 +323,22 @@ struct SettingsView: View {
     }
 }
 
-/// Edits the server's scheduling settings. Changes are saved together.
-private struct WorkingHoursSection: View {
+// MARK: - Scheduling
+
+/// The server's scheduling settings. Changes are saved together.
+struct SchedulingSettingsView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let settings = model.state?.settings {
+            SchedulingForm(settings: settings)
+        } else {
+            ContentUnavailableView("Not synced yet", systemImage: "clock", description: Text("Connect to your server first."))
+        }
+    }
+}
+
+private struct SchedulingForm: View {
     @Environment(AppModel.self) private var model
     let settings: PlannerKit.Settings
     @State private var draft: PlannerKit.Settings
@@ -150,41 +349,51 @@ private struct WorkingHoursSection: View {
         _draft = State(initialValue: settings)
     }
 
-    private static let times: [String] = (0..<48).map { String(format: "%02d:%02d", $0 / 2, ($0 % 2) * 30) }
-    private static let weekdayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    private var valid: Bool { !draft.workDays.isEmpty && draft.workEnd > draft.workStart }
 
     var body: some View {
-        Section("Working hours") {
-            Picker("Start", selection: $draft.workStart) { times(including: draft.workStart) }
-            Picker("End", selection: $draft.workEnd) { times(including: draft.workEnd) }
-            HStack(spacing: 6) {
-                ForEach(1...7, id: \.self) { day in
-                    let on = draft.workDays.contains(day)
-                    Button(Self.weekdayNames[day - 1]) {
-                        if on { draft.workDays.removeAll { $0 == day } } else { draft.workDays = (draft.workDays + [day]).sorted() }
+        Form {
+            Section {
+                WeekdayPicker(days: $draft.workDays)
+                    .padding(.vertical, 4)
+                Picker("From", selection: $draft.workStart) { TimeOptions(current: draft.workStart) }
+                Picker("Until", selection: $draft.workEnd) { TimeOptions(current: draft.workEnd) }
+            } header: {
+                Text("Working hours")
+            } footer: {
+                Text("Planner books tasks inside these hours, unless a project has its own.")
+            }
+
+            Section("Blocks") {
+                Stepper("Longest block: \(Format.duration(draft.maxBlockMin))", value: $draft.maxBlockMin, in: 30...480, step: 15)
+                Stepper("Plan \(draft.horizonDays) days ahead", value: $draft.horizonDays, in: 1...60)
+            }
+
+            Section {
+                Stepper(draft.bufferMin == 0 ? "No breathing room" : "\(draft.bufferMin) min breathing room", value: $draft.bufferMin, in: 0...120, step: 5)
+                if draft.bufferMin > 0 {
+                    Stepper("Around events of \(Format.duration(draft.bufferMinEventMin)) or more", value: $draft.bufferMinEventMin, in: 15...1440, step: 15)
+                }
+            } header: {
+                Text("Around long events")
+            } footer: {
+                Text("Keeps time free before and after long things like a shift, so tasks aren't booked right up against them.")
+            }
+
+            Section("Time zone") {
+                LabeledContent("Planning in", value: draft.timezone)
+                if draft.timezone != TimeZone.current.identifier {
+                    Button("Use \(TimeZone.current.identifier)") {
+                        draft.timezone = TimeZone.current.identifier
+                        draft.timezoneConfirmed = true
                     }
-                    .buttonStyle(.bordered)
-                    .tint(on ? .accentColor : .secondary)
-                    .accessibilityAddTraits(on ? .isSelected : [])
                 }
             }
-            Stepper("Longest block: \(Format.duration(draft.maxBlockMin))", value: $draft.maxBlockMin, in: 30...480, step: 15)
-            Stepper("Plan \(draft.horizonDays) days ahead", value: $draft.horizonDays, in: 1...60)
-            Stepper(
-                draft.bufferMin == 0 ? "No buffer around long events" : "\(draft.bufferMin) min buffer around events of \(Format.duration(draft.bufferMinEventMin))+",
-                value: $draft.bufferMin, in: 0...120, step: 5
-            )
-            if draft.bufferMin > 0 {
-                Stepper("Long event: \(Format.duration(draft.bufferMinEventMin)) or more", value: $draft.bufferMinEventMin, in: 15...1440, step: 15)
-            }
-            LabeledContent("Time zone", value: draft.timezone)
-            if draft.timezone != TimeZone.current.identifier {
-                Button("Use This Device's Time Zone (\(TimeZone.current.identifier))") {
-                    draft.timezone = TimeZone.current.identifier
-                    draft.timezoneConfirmed = true
-                }
-            }
-            HStack {
+        }
+        .formStyle(.grouped)
+        .navigationTitle("Scheduling")
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
                     saving = true
                     Task {
@@ -202,18 +411,25 @@ private struct WorkingHoursSection: View {
                         saving = false
                     }
                 }
-                .disabled(draft == settings || saving || draft.workDays.isEmpty || draft.workEnd <= draft.workStart)
-                if draft != settings {
+                .disabled(draft == settings || saving || !valid)
+            }
+            if draft != settings {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Revert") { draft = settings }
                 }
             }
         }
         .onChange(of: settings) { _, new in draft = new }
     }
+}
 
-    @ViewBuilder
-    private func times(including current: String) -> some View {
+/// Half-hour choices, keeping an off-grid value that's already set.
+struct TimeOptions: View {
+    let current: String
+    private static let times: [String] = (0..<96).map { String(format: "%02d:%02d", $0 / 4, ($0 % 4) * 15) }
+
+    var body: some View {
         let options = Self.times.contains(current) ? Self.times : (Self.times + [current]).sorted()
-        ForEach(options, id: \.self) { Text($0).tag($0) }
+        ForEach(options, id: \.self) { Text(Format.clock($0)).tag($0) }
     }
 }
