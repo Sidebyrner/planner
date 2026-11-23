@@ -234,6 +234,79 @@ export class Planner {
   }
 
   /**
+   * Record how a task block went.
+   *  done: the block's time counts as work done. A one-task block takes its
+   *    minutes off the task's estimate and completes the task once nothing is
+   *    left; a Quick batch completes all its tasks.
+   *  missed: nothing was done. The block stays as a record and the tasks are
+   *    proposed fresh time (not booked; apply_schedule books it).
+   */
+  async markBlock(
+    id: string,
+    outcome: 'done' | 'missed',
+  ): Promise<{ block: CalEvent; tasks: Task[]; replan: ScheduleProposal | null }> {
+    const block = this.store.getEvent(id);
+    if (!block) throw new NotFound(`No event with id ${id}`);
+    const ids = block.taskIds.length ? block.taskIds : block.taskId ? [block.taskId] : [];
+    if (!ids.length) throw new Error('Only task blocks can be marked done or missed.');
+    if (block.outcome === outcome) throw new Error(`That block is already marked ${outcome}.`);
+    const minutes = Math.round((Date.parse(block.endAt) - Date.parse(block.startAt)) / 60000);
+    this.store.updateEvent(id, { outcome });
+
+    const tasks: Task[] = [];
+    for (const taskId of ids) {
+      const task = this.store.getTask(taskId);
+      if (!task) continue;
+      if (outcome === 'done') {
+        if (ids.length > 1) {
+          tasks.push(task.status === 'done' ? task : await this.updateTask(task.id, { status: 'done' }));
+          continue;
+        }
+        const left = Math.max(0, task.estimateMin - minutes);
+        tasks.push(
+          left === 0 && task.status !== 'done'
+            ? await this.updateTask(task.id, { status: 'done' })
+            : this.store.updateTask(task.id, { estimateMin: Math.max(left, 5) })!,
+        );
+      } else {
+        // Re-marking a block that was "done": give the minutes back and reopen what it finished.
+        if (block.outcome === 'done') {
+          if (task.status === 'done') await this.updateTask(task.id, { status: 'todo' });
+          else if (ids.length === 1) this.store.updateTask(task.id, { estimateMin: task.estimateMin + minutes });
+        }
+        tasks.push(this.store.getTask(task.id)!);
+      }
+    }
+    const open = tasks.filter((t) => t.status === 'todo').map((t) => t.id);
+    const replan = outcome === 'missed' && open.length && this.store.getSettings().timezoneConfirmed ? this.propose({ taskIds: open }) : null;
+    return { block: this.store.getEvent(id)!, tasks, replan };
+  }
+
+  /** Task blocks that have ended in the last `days` days and nobody has marked yet. */
+  blocksToReview(now = new Date(), days = 7): CalEvent[] {
+    const from = new Date(now.getTime() - days * 86400_000).toISOString();
+    return this.store
+      .listEvents({ from, to: now.toISOString() })
+      .filter((e) => (e.taskId || e.taskIds.length) && !e.outcome && Date.parse(e.endAt) <= now.getTime())
+      .filter((e) => (e.taskIds.length ? e.taskIds : [e.taskId!]).some((t) => this.store.getTask(t)?.status === 'todo'));
+  }
+
+  /** Where Planner's picture of the calendar comes from, and how fresh it is. */
+  calendarSources(): {
+    sourceOfTruth: 'google' | 'device' | 'none';
+    device: { lastSyncAt: string | null; minutesAgo: number | null };
+    google: ReturnType<GoogleCalendar['status']>;
+  } {
+    const device = this.store.getValue<{ at: string }>('device_last_sync');
+    const google = this.google.status();
+    return {
+      sourceOfTruth: google.connected ? 'google' : device ? 'device' : 'none',
+      device: { lastSyncAt: device?.at ?? null, minutesAgo: device ? Math.round((Date.now() - Date.parse(device.at)) / 60000) : null },
+      google,
+    };
+  }
+
+  /**
    * Have the scheduler ignore an event (scope "event"), every occurrence of its
    * series ("series"), or undo either. Works on read-only device events too:
    * the flag lives in Planner, not in the calendar.

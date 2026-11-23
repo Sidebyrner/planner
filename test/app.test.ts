@@ -352,6 +352,31 @@ describe('MCP server', () => {
     expect((await api('GET', '/api/state')).body.tasks[0].status).toBe('done');
   });
 
+  it('groups follow-ups by person and marks blocks over MCP', async () => {
+    const client = await connectClient();
+    const past = new Date(Date.now() - 3 * 86400_000).toISOString();
+    const later = new Date(Date.now() + 3 * 86400_000).toISOString();
+    await call(client, 'create_task', { title: 'Salude content', waitingOn: 'Matt', followUpAt: past, contact: { name: 'Matt', email: 'matt@example.com' } });
+    await call(client, 'create_task', { title: 'Menu photos', waitingOn: 'matt', followUpAt: later });
+    await call(client, 'create_task', { title: 'Quote', waitingOn: 'Daryl', followUpAt: later });
+    const review = await call(client, 'weekly_review');
+    expect(review.followUpsByPerson.map((p: any) => [p.person, p.overdue.length, p.pending.length])).toEqual([
+      ['Matt', 1, 1],
+      ['Daryl', 0, 1],
+    ]);
+    expect(review.followUpsByPerson[0]).toMatchObject({ contact: { email: 'matt@example.com' } });
+    expect(review.followUpsByPerson[0].overdue[0].daysPast).toBe(3);
+
+    const task = await call(client, 'create_task', { title: 'Draft deck', estimateMin: 90 });
+    const start = Date.now() - 2 * 3600_000;
+    const [block] = await call(client, 'apply_schedule', {
+      blocks: [{ taskId: task.id, startAt: new Date(start).toISOString(), endAt: new Date(start + 3600_000).toISOString() }],
+    });
+    expect((await call(client, 'get_agenda')).toReview.map((b: any) => b.id)).toEqual([block.id]);
+    const marked = await call(client, 'mark_block', { id: block.id, outcome: 'done' });
+    expect(marked.tasks[0].estimateMin).toBe(30);
+  });
+
   it('works with projects, checklists and waiting-on by name', async () => {
     const client = await connectClient();
     const project = await call(client, 'create_project', { name: 'Side work', emoji: '💼', color: 'indigo' });

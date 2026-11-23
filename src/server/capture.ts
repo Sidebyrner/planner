@@ -6,6 +6,12 @@ import { slugTag } from './store.js';
 const DURATION = /(?:\bfor\s+)?(?<![\w:.])(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|hours?|hrs?|h)\b/i;
 const TAG = /(?:^|\s)#([\p{L}\p{N}][\p{L}\p{N}_'’-]*)/u;
 const MENTION = /(?:^|\s)@([\p{L}][\p{L}\p{N}_'’.-]*)/u;
+/** "waiting on Matt", "waiting for Ryan" at the start of a line: the same as @Matt. */
+const WAITING_ON = /^\s*waiting\s+(?:on|for)\s+([\p{L}][\p{L}\p{N}_'’.-]*)\s*/iu;
+/** "re: Salude content" — what the line is about. */
+const RE = /(?:^|\s)re:?\s+/i;
+/** "check Wed", "chase Friday", "follow up Monday": the date is when to chase. */
+const FOLLOW_UP_WORD = /\b(check(?:\s+in)?|chase|follow[\s-]?up|ping|nudge)(?:\s+(?:on|at))?\s*$/i;
 /** Waiting tasks with no date given come back after this many days. */
 const DEFAULT_FOLLOW_UP_DAYS = 2;
 
@@ -18,6 +24,15 @@ export function matchProject(typed: string, projects: Project[]): Project | null
   if (exact) return exact;
   const prefixed = live.filter((p) => p.tag.startsWith(slug) || slugTag(p.name).startsWith(slug));
   return prefixed.length === 1 ? prefixed[0] : null;
+}
+
+/** Live projects with a word of their name or tag starting with `word` ("backsplash" -> Mr Backsplash). */
+function projectsNamedBy(word: string, projects: Project[]): Project[] {
+  const slug = slugTag(word);
+  if (slug.length < 4) return [];
+  return projects.filter(
+    (p) => !p.archived && [...slugTag(p.name).split('-'), ...p.tag.split('-')].some((part) => part.startsWith(slug)),
+  );
 }
 
 function cut(text: string, m: RegExpMatchArray): string {
@@ -38,6 +53,8 @@ const LEAD_IN_WORD = /\b(on|at|from|this|next)\s*$/i;
  *
  *   "Order kegs #bar 15m"            -> task in the project tagged #bar
  *   "@Sam send the invoice Friday"   -> waiting on Sam, follow up Friday
+ *   "waiting on Matt re: Salude content, check Wed"
+ *                                    -> waiting on Matt, project Salude (if one fits), follow up Wednesday
  */
 export function parseCapture(input: string, opts: { now?: Date; timezone: string; projects?: Project[] }): Captured {
   const now = opts.now ?? new Date();
@@ -60,15 +77,37 @@ export function parseCapture(input: string, opts: { now?: Date; timezone: string
   const project = projectTag ? matchProject(projectTag, opts.projects ?? []) : null;
 
   let waitingOn: string | null = null;
-  const mention = text.match(MENTION);
+  const lead = forced !== 'event' ? text.match(WAITING_ON) : null;
+  if (lead) {
+    waitingOn = lead[1].replace(/[.,'’-]+$/, '');
+    text = text.slice(lead[0].length);
+    forced = 'task';
+  }
+  const mention = waitingOn ? null : text.match(MENTION);
   if (mention && forced !== 'event') {
     waitingOn = mention[1].replace(/[.'’-]+$/, '');
     text = cut(text, mention);
     forced = 'task';
   }
+  // "re: Salude content" names the project when one word of it fits exactly one project.
+  const about = text.match(RE);
+  let implied: Project | null = null;
+  if (about) {
+    text = cut(text, about);
+    if (!projectTag) {
+      const subject = text.slice(about.index).split(/[,;]|\b(?:check|chase|follow|by|due)\b/i)[0];
+      const hits = new Set(
+        subject
+          .split(/\s+/)
+          .filter((w) => w.replace(/\W/g, '').length >= 4)
+          .flatMap((w) => projectsNamedBy(w, opts.projects ?? [])),
+      );
+      if (hits.size === 1) implied = [...hits][0];
+    }
+  }
   const tagged = {
-    projectTag,
-    projectId: project?.id ?? null,
+    projectTag: projectTag ?? implied?.tag ?? null,
+    projectId: project?.id ?? implied?.id ?? null,
     newProject: projectTag && !project ? slugTag(projectTag) || null : null,
     waitingOn,
   };
@@ -116,7 +155,9 @@ export function parseCapture(input: string, opts: { now?: Date; timezone: string
 
     let before = text.slice(0, hit.index);
     const after = text.slice(hit.index + hit.text.length);
-    if (DEADLINE_WORD.test(before)) {
+    if (FOLLOW_UP_WORD.test(before)) {
+      before = before.replace(FOLLOW_UP_WORD, '');
+    } else if (DEADLINE_WORD.test(before)) {
       isDeadline = true;
       before = before.replace(DEADLINE_WORD, '');
     } else {

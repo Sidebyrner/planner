@@ -77,6 +77,28 @@ export function buildMcpServer(planner: Planner): McpServer {
   /** busy = blocks time, free = doesn't (all-day), ignored = the user said to leave it out. */
   const withScheduling = (e: CalEvent) => ({ ...e, scheduling: planner.schedulingStatus(e) });
 
+  /** Waiting-on work by person: what is past its follow-up (back on the open list) and what is still pending. */
+  const byPerson = (tasks: Task[], now: number) => {
+    const people = new Map<string, { person: string; contact: Task['contact']; overdue: unknown[]; pending: unknown[] }>();
+    for (const t of tasks) {
+      if (!t.waitingOn || t.status === 'done') continue;
+      const key = t.waitingOn.toLowerCase();
+      const entry = people.get(key) ?? { person: t.waitingOn, contact: null, overdue: [], pending: [] };
+      entry.contact ??= t.contact;
+      const past = t.status === 'todo' || (!!t.followUpAt && Date.parse(t.followUpAt) <= now);
+      const item = {
+        id: t.id,
+        title: t.title,
+        followUpAt: t.followUpAt,
+        ...(past && t.followUpAt ? { daysPast: Math.max(0, Math.floor((now - Date.parse(t.followUpAt)) / 86400_000)) } : {}),
+        links: t.links,
+      };
+      (past ? entry.overdue : entry.pending).push(item);
+      people.set(key, entry);
+    }
+    return [...people.values()].sort((a, b) => b.overdue.length - a.overdue.length || a.person.localeCompare(b.person));
+  };
+
   const openTaskView = (t: Task, future: CalEvent[], now: number, projects: Map<string, Project>) => {
     const blocks = future.filter((e) => e.taskId === t.id || e.taskIds.includes(t.id));
     return {
@@ -96,7 +118,9 @@ export function buildMcpServer(planner: Planner): McpServer {
       title: 'Get agenda',
       description:
         'One day at a glance: the events on that day, open tasks grouped by project (with how much of each is still ' +
-        'unscheduled), overdue tasks, follow-ups that are due, the user\'s timezone and working hours, and the current time. Start here.',
+        'unscheduled), overdue tasks, follow-ups that are due, the user\'s timezone and working hours, and the current time. ' +
+        'toReview lists finished task blocks nobody has marked done or missed (see mark_block); calendarSources says where ' +
+        'the calendar comes from and when it last synced. Start here.',
       inputSchema: { date: z.string().optional().describe('YYYY-MM-DD in the user\'s timezone. Defaults to today.') },
       annotations: { readOnlyHint: true },
     },
@@ -123,7 +147,8 @@ export function buildMcpServer(planner: Planner): McpServer {
         events: planner.listEvents({ from: day.toUTC().toISO()!, to: day.plus({ days: 1 }).toUTC().toISO()! }).map(withScheduling),
         openTasksByProject: [...groups.entries()].map(([id, tasks]) => ({ project: projectLabel(projects.get(id)), projectId: id || null, tasks })),
         followUps: open.filter((t) => t.waitingOn).map((t) => ({ id: t.id, title: t.title, waitingOn: t.waitingOn })),
-        google: planner.google.status(),
+        toReview: planner.blocksToReview().map((e) => ({ id: e.id, title: e.title, startAt: e.startAt, endAt: e.endAt })),
+        calendarSources: planner.calendarSources(),
       };
     }),
   );
@@ -345,6 +370,19 @@ export function buildMcpServer(planner: Planner): McpServer {
   );
 
   server.registerTool(
+    'mark_block',
+    {
+      title: 'Mark a block done or missed',
+      description:
+        'Record how a task block went. done: its minutes come off the task\'s estimate (the task completes when none are ' +
+        'left; a Quick batch completes all its tasks). missed: nothing was done; the block stays as a record and replan ' +
+        'proposes new time for the work (book it with apply_schedule). get_agenda lists blocks to review.',
+      inputSchema: { id: z.string().describe('Block (event) id'), outcome: z.enum(['done', 'missed']) },
+    },
+    tool(({ id, outcome }) => planner.markBlock(id, outcome)),
+  );
+
+  server.registerTool(
     'ignore_event',
     {
       title: 'Ignore an event for scheduling',
@@ -427,7 +465,8 @@ export function buildMcpServer(planner: Planner): McpServer {
       title: 'Weekly review',
       description:
         'The week so far (from Monday in the user\'s timezone) by project: tasks finished, hours booked, plus what is overdue, ' +
-        'which follow-ups are due, and open tasks with no time booked.',
+        'which follow-ups are due, and open tasks with no time booked. followUpsByPerson groups everything waiting on ' +
+        'someone, with how many days each follow-up is past and the contact to reach them.',
       inputSchema: {},
       annotations: { readOnlyHint: true },
     },
@@ -463,6 +502,8 @@ export function buildMcpServer(planner: Planner): McpServer {
         byProject,
         overdue: open.filter((t) => t.dueAt && Date.parse(t.dueAt) < now).map((t) => ({ id: t.id, title: t.title, dueAt: t.dueAt })),
         followUpsDue: open.filter((t) => t.waitingOn).map((t) => ({ id: t.id, title: t.title, waitingOn: t.waitingOn })),
+        followUpsByPerson: byPerson(tasks, now),
+        blocksToReview: planner.blocksToReview(new Date(now)).length,
         waiting: tasks.filter((t) => t.status === 'waiting').length,
         notBooked: open.filter((t) => remainingMinutes(t, future, now) > 0).map((t) => ({ id: t.id, title: t.title, project: projectLabel(projects.get(t.projectId ?? '')) })),
       };
@@ -616,7 +657,9 @@ export function buildMcpServer(planner: Planner): McpServer {
       description:
         'Create a task or event from one plain-language line, parsed the same way as the app\'s capture bar ' +
         '("Draft proposal by Friday 2h !high #work", "Call supplier Friday 2pm 30 min", "@Sam send the invoice Friday"). ' +
-        '#tag sets the project (an unknown tag creates one); @Name makes a waiting-on task. Prefer create_task / create_event when you already know the fields.',
+        '#tag sets the project (an unknown tag creates one); @Name or "waiting on Name" makes a waiting-on task, ' +
+        '"re: <subject>" picks the project when a word of the subject fits one, and "check Wed" sets the follow-up ' +
+        '("waiting on Matt re: Salude content, check Wed"). Prefer create_task / create_event when you already know the fields.',
       inputSchema: { text: z.string().min(1) },
     },
     tool(({ text }) => planner.capture(text)),

@@ -110,6 +110,7 @@ const toEvent = (r: Row): CalEvent => ({
   projectId: r.effective_project_id ?? r.project_id ?? null,
   taskIds: parseJson<string[]>(r.task_ids, []),
   ignored: !!r.ignored,
+  outcome: r.outcome ?? null,
 });
 
 const toProject = (r: Row): Project => ({
@@ -159,7 +160,7 @@ export type TaskInput = Partial<
 export type EventInput = Partial<
   Pick<
     CalEvent,
-    'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'externalId' | 'source' | 'projectId' | 'taskIds' | 'ignored'
+    'title' | 'notes' | 'startAt' | 'endAt' | 'allDay' | 'taskId' | 'googleId' | 'externalId' | 'source' | 'projectId' | 'taskIds' | 'ignored' | 'outcome'
   >
 >;
 export type ProjectInput = Partial<Omit<Project, 'id'>>;
@@ -187,6 +188,7 @@ export class Store {
       project_id: 'TEXT',
       task_ids: "TEXT NOT NULL DEFAULT '[]'",
       ignored: 'INTEGER NOT NULL DEFAULT 0',
+      outcome: 'TEXT',
     });
     addColumns('tasks', {
       project_id: 'TEXT',
@@ -483,7 +485,7 @@ export class Store {
     this.db
       .prepare(
         `UPDATE events SET title = ?, notes = ?, start_at = ?, end_at = ?, all_day = ?,
-         task_id = ?, google_id = ?, external_id = ?, source = ?, project_id = ?, task_ids = ?, ignored = ? WHERE id = ?`,
+         task_id = ?, google_id = ?, external_id = ?, source = ?, project_id = ?, task_ids = ?, ignored = ?, outcome = ? WHERE id = ?`,
       )
       .run(
         next.title,
@@ -498,6 +500,7 @@ export class Store {
         ownProject,
         JSON.stringify(next.taskIds ?? []),
         next.ignored ? 1 : 0,
+        next.outcome ?? null,
         id,
       );
     return this.getEvent(id);

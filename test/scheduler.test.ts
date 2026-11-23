@@ -16,7 +16,7 @@ const task = (p: Partial<Task>): Task => ({
 });
 const event = (startAt: string, endAt: string, p: Partial<CalEvent> = {}): CalEvent => ({
   id: `e${++n}`, title: 'Meeting', notes: '', startAt, endAt, allDay: false, taskId: null, googleId: null, externalId: null,
-  source: 'local', projectId: null, taskIds: [], ignored: false, ...p,
+  source: 'local', projectId: null, taskIds: [], ignored: false, outcome: null, ...p,
 });
 const project = (p: Partial<Project>): Project => ({
   id: `p${++n}`, name: 'Project', tag: `p${n}`, color: 'teal', emoji: '', archived: false, sortOrder: 0,

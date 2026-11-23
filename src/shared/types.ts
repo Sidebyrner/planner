@@ -142,6 +142,8 @@ export interface CalEvent {
   source: 'local' | 'google' | 'device';
   /** Set on this one event: the scheduler treats it as if it were not there. */
   ignored: boolean;
+  /** For a task block once it's over: whether the work happened. */
+  outcome: 'done' | 'missed' | null;
 }
 
 export interface Settings {

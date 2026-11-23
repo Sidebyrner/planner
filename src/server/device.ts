@@ -113,5 +113,6 @@ export async function syncDevice(planner: Planner, input: DeviceSyncInput): Prom
   // Only Planner's own events: device events came from the device, and Google
   // events reach the device through the Google account itself.
   const blocks = store.listEvents({ from, to }).filter((e) => e.source === 'local');
+  store.setValue('device_last_sync', { at: new Date().toISOString(), from, to, events: upserted });
   return { upserted, removed, blocks, rejected };
 }

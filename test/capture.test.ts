@@ -88,3 +88,27 @@ describe('parseCapture tags and mentions', () => {
     expect(t('Ask @Alex about the keys')).toMatchObject({ title: 'Ask about the keys', waitingOn: 'Alex', followUpAt: '2026-11-22T14:00:00.000Z' });
   });
 });
+
+describe('parseCapture waiting-on lines', () => {
+  const projects: Project[] = [
+    { id: 's11', name: 'Salude 11', tag: 'salude-11', color: 'teal', emoji: '', archived: false, sortOrder: 1, windows: [], windowStrict: false, hostMatch: null, links: [] },
+    { id: 'mrb', name: 'Mr Backsplash', tag: 'mr-backsplash', color: 'rose', emoji: '', archived: false, sortOrder: 2, windows: [], windowStrict: false, hostMatch: null, links: [] },
+  ];
+  const t = (text: string) => parseCapture(text, { ...opts, projects });
+
+  it('reads "waiting on X re: subject, check <day>" as one waiting task', () => {
+    expect(t('waiting on Matt re: Salude content, check Wed')).toMatchObject({
+      kind: 'task', title: 'Salude content', waitingOn: 'Matt', projectId: 's11', projectTag: 'salude-11',
+      followUpAt: '2026-11-25T14:00:00.000Z', // Wednesday 09:00 New York
+    });
+  });
+
+  it('works with @Name and other chase words, and leaves the project alone when it is unclear', () => {
+    expect(t('@Daryl re: backsplash quote, chase Friday')).toMatchObject({ waitingOn: 'Daryl', projectId: 'mrb', title: 'backsplash quote' });
+    expect(t('waiting for Ryan re: invoice, follow up Monday')).toMatchObject({ waitingOn: 'Ryan', projectId: null, title: 'invoice' });
+  });
+
+  it('keeps an explicit #tag over the subject', () => {
+    expect(t('waiting on Matt re: Salude content #mr-backsplash check Wed')).toMatchObject({ projectId: 'mrb' });
+  });
+});
