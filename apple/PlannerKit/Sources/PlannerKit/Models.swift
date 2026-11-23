@@ -428,14 +428,16 @@ public struct EventDraft: Encodable, Hashable, Sendable {
     public var endAt: Date
     public var allDay: Bool?
     public var taskId: String?
+    public var projectId: String?
 
-    public init(title: String, notes: String? = nil, startAt: Date, endAt: Date, allDay: Bool? = nil, taskId: String? = nil) {
+    public init(title: String, notes: String? = nil, startAt: Date, endAt: Date, allDay: Bool? = nil, taskId: String? = nil, projectId: String? = nil) {
         self.title = title
         self.notes = notes
         self.startAt = startAt
         self.endAt = endAt
         self.allDay = allDay
         self.taskId = taskId
+        self.projectId = projectId
     }
 }
 

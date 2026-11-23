@@ -43,6 +43,8 @@ targets:
         NSCalendarsFullAccessUsageDescription: >-
           Planner reads your calendars so it can plan tasks around your real
           events, and adds the time blocks it books to a "Planner" calendar.
+        NSMicrophoneUsageDescription: Planner listens when you tap the mic, so you can add tasks and events by voice.
+        NSSpeechRecognitionUsageDescription: Planner turns what you say into a task or event. Recognition runs on this device when it can.
         NSAppTransportSecurity:
           # Lets the app reach a Planner server on localhost or the LAN during development.
           NSAllowsLocalNetworking: true
@@ -63,6 +65,7 @@ targets:
         "ENABLE_APP_SANDBOX[sdk=macosx*]": YES
         "ENABLE_OUTGOING_NETWORK_CONNECTIONS[sdk=macosx*]": YES
         "ENABLE_RESOURCE_ACCESS_CALENDARS[sdk=macosx*]": YES
+        "ENABLE_RESOURCE_ACCESS_AUDIO_INPUT[sdk=macosx*]": YES
         "ENABLE_HARDENED_RUNTIME[sdk=macosx*]": YES
         # iOS only: the Keychain group shared with the widget.
         "CODE_SIGN_ENTITLEMENTS[sdk=iphoneos*]": Planner/Planner-iOS.entitlements

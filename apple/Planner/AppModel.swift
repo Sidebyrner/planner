@@ -405,6 +405,155 @@ final class AppModel {
         event.allTaskIds.compactMap { task(id: $0) }
     }
 
+    // MARK: Today: gaps, quick add, swipe actions
+
+    struct Gap: Identifiable, Hashable {
+        let start: Date
+        let end: Date
+        var minutes: Int { Int(end.timeIntervalSince(start) / 60) }
+        var id: Date { start }
+    }
+
+    /// Free stretches of at least `minMinutes` between now and the end of today's waking hours
+    /// (07:00 to the later of 22:00 and your working-hours end). All-day events don't count.
+    func todayGaps(minMinutes: Int = 30, now: Date = Date()) -> [Gap] {
+        let calendar = Calendar.current
+        let dayStart = calendar.startOfDay(for: now)
+        let workEndHour = state?.settings.workEnd.split(separator: ":").first.flatMap { Int($0) } ?? 17
+        let windowStart = max(now, calendar.date(bySettingHour: 7, minute: 0, second: 0, of: dayStart) ?? now)
+        let windowEnd = calendar.date(bySettingHour: min(max(22, workEndHour), 23), minute: 59, second: 0, of: dayStart) ?? now
+        guard windowEnd > windowStart else { return [] }
+
+        // Round the first gap up to the next 5 minutes so "now" isn't 4:47.
+        let snap = 5 * 60.0
+        var cursor = Date(timeIntervalSinceReferenceDate: (windowStart.timeIntervalSinceReferenceDate / snap).rounded(.up) * snap)
+        var gaps: [Gap] = []
+        let busy = (state?.events ?? []).filter { !$0.allDay && $0.endAt > cursor && $0.startAt < windowEnd }.sorted { $0.startAt < $1.startAt }
+        for event in busy {
+            if event.startAt > cursor { gaps.append(Gap(start: cursor, end: min(event.startAt, windowEnd))) }
+            cursor = max(cursor, event.endAt)
+        }
+        if cursor < windowEnd { gaps.append(Gap(start: cursor, end: windowEnd)) }
+        return gaps.filter { $0.minutes >= minMinutes }
+    }
+
+    /// Minutes of a task not yet covered by a future block (a Quick block covers its tasks entirely).
+    func remainingMinutes(_ task: PlannerTask, now: Date = Date()) -> Int {
+        let future = (state?.events ?? []).filter { $0.endAt > now }
+        if future.contains(where: { $0.taskIds.contains(task.id) }) { return 0 }
+        let booked = future.filter { $0.taskId == task.id }.reduce(0.0) { $0 + $1.endAt.timeIntervalSince(max($1.startAt, now)) / 60 }
+        return max(0, task.estimateMin - Int(booked))
+    }
+
+    /// Open tasks that fit in a gap, most urgent first.
+    func suggestions(for gap: Gap, limit: Int = 2) -> [PlannerTask] {
+        openTasks
+            .map { ($0, remainingMinutes($0)) }
+            .filter { $0.1 > 0 && $0.1 <= gap.minutes }
+            .sorted { a, b in
+                let da = a.0.dueAt ?? .distantFuture, db = b.0.dueAt ?? .distantFuture
+                return da != db ? da < db : a.0.priority > b.0.priority
+            }
+            .prefix(limit)
+            .map(\.0)
+    }
+
+    /// Books a block for an existing task.
+    @discardableResult
+    func book(_ task: PlannerTask, at start: Date, minutes: Int) async -> Bool {
+        await perform { _ = try await $0.applySchedule([BlockBooking(taskId: task.id, startAt: start, endAt: start.addingTimeInterval(Double(minutes) * 60))]) }
+    }
+
+    /// New task with its block in one go.
+    @discardableResult
+    func addTaskBlock(title: String, projectId: String?, at start: Date, minutes: Int) async -> Bool {
+        await perform { api in
+            let task = try await api.createTask(TaskDraft(title: title, estimateMin: max(5, minutes), projectId: projectId))
+            _ = try await api.applySchedule([BlockBooking(taskId: task.id, startAt: start, endAt: start.addingTimeInterval(Double(minutes) * 60))])
+        }
+    }
+
+    @discardableResult
+    func addEvent(title: String, projectId: String?, at start: Date, minutes: Int) async -> Bool {
+        await perform { _ = try await $0.createEvent(EventDraft(title: title, startAt: start, endAt: start.addingTimeInterval(Double(minutes) * 60), projectId: projectId)) }
+    }
+
+    func push(_ event: CalEvent, minutes: Int) async {
+        await move(event, to: event.startAt.addingTimeInterval(Double(minutes) * 60))
+    }
+
+    func moveToTomorrow(_ event: CalEvent) async {
+        guard let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: event.startAt) else { return }
+        await move(event, to: tomorrow)
+    }
+
+    /// Marks every task in a block done (which also gives back their remaining time).
+    func completeTasks(in event: CalEvent) async {
+        let ids = event.allTaskIds
+        await perform { api in
+            for id in ids { _ = try await api.updateTask(id: id, TaskPatch(status: .done)) }
+        }
+    }
+
+    // MARK: Plan the rest of today
+
+    /// Proposed blocks that start before midnight, shown inline on Today.
+    var todayProposal: [ProposedBlock] = []
+
+    func planRestOfToday() async {
+        guard let api = engine?.api else { return }
+        do {
+            let proposal = try await api.proposeSchedule()
+            let end = Calendar.current.date(byAdding: .day, value: 1, to: Calendar.current.startOfDay(for: Date())) ?? Date()
+            todayProposal = proposal.blocks.filter { $0.startAt < end }
+            if todayProposal.isEmpty {
+                actionError = proposal.blocks.isEmpty
+                    ? "Nothing to plan: every open task already has time booked."
+                    : "No free working time left today. The next slot Planner found is \(Format.relative(proposal.blocks[0].startAt))."
+            }
+        } catch {
+            actionError = error.localizedDescription
+        }
+    }
+
+    func bookToday(_ blocks: [ProposedBlock]) async {
+        let ids = Set(blocks.map(\.id))
+        if await perform({ _ = try await $0.applySchedule(blocks.map(BlockBooking.init)) }) {
+            todayProposal.removeAll { ids.contains($0.id) }
+        }
+    }
+
+    func skipToday(_ block: ProposedBlock) {
+        todayProposal.removeAll { $0.id == block.id }
+    }
+
+    // MARK: Voice
+
+    /// Saves a spoken (or typed) line and returns what was created, for the confirmation and Undo.
+    func captureForVoice(_ text: String) async -> CaptureResult? {
+        guard let api = engine?.api else {
+            actionError = "Connect Planner to your server first."
+            return nil
+        }
+        do {
+            let result = try await api.capture(text)
+            await sync()
+            return result
+        } catch {
+            actionError = error.localizedDescription
+            return nil
+        }
+    }
+
+    func undo(_ result: CaptureResult) async {
+        await perform { api in
+            if let task = result.task { try await api.deleteTask(id: task.id) }
+            if let event = result.event { try await api.deleteEvent(id: event.id) }
+            // A #tag that created a project just now: remove it again (it has no other tasks yet).
+            if let project = result.project { _ = try? await api.removeProject(id: project.id) }
+        }
+    }
+
     // MARK: Today
 
     /// Today's timed events and blocks, in order.

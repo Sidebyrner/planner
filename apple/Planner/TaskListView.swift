@@ -220,6 +220,7 @@ struct CaptureBar: View {
     @State private var text = ""
     @State private var preview: Captured?
     @State private var saving = false
+    @State private var showVoice = false
     @FocusState private var focused: Bool
 
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -234,13 +235,19 @@ struct CaptureBar: View {
                     .disabled(saving)
                 if saving {
                     ProgressView().controlSize(.small)
+                } else if trimmed.isEmpty {
+                    Button { showVoice = true } label: {
+                        Image(systemName: "mic.circle.fill").imageScale(.large)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityLabel("Speak a task")
                 } else {
                     Button(action: save) {
                         Image(systemName: "plus.circle.fill").imageScale(.large)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Color.accentColor)
-                    .disabled(trimmed.isEmpty)
                     .accessibilityLabel("Add")
                 }
             }
@@ -250,6 +257,7 @@ struct CaptureBar: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .sheet(isPresented: $showVoice) { VoiceCaptureView() }
         .task(id: trimmed) {
             guard !trimmed.isEmpty else {
                 preview = nil
