@@ -281,4 +281,55 @@ extension AppModel {
         let now = Date()
         return openTasks.filter { ($0.dueAt ?? .distantFuture) < now }
     }
+
+    // MARK: Projects
+
+    /// How a project is doing, for its card and its page. `nil` project means unfiled tasks.
+    struct ProjectSummary {
+        var overdue: [PlannerTask]
+        var scheduled: [PlannerTask]
+        /// Open, not overdue, with nothing booked.
+        var unscheduled: [PlannerTask]
+        var waiting: [PlannerTask]
+        var doneThisWeek: [PlannerTask]
+        var dueThisWeek: Int
+        /// Estimated minutes not yet covered by a block.
+        var minutesLeft: Int
+
+        var open: Int { overdue.count + scheduled.count + unscheduled.count }
+        /// Scheduled first, then the most urgent unscheduled task.
+        var nextUp: PlannerTask? { overdue.first ?? scheduled.first ?? unscheduled.first }
+        var needsAttention: Bool { !overdue.isEmpty || (scheduled.isEmpty && !unscheduled.isEmpty) }
+        /// Share of this week's work that's done (finished this week vs still open).
+        var progress: Double {
+            let total = doneThisWeek.count + open
+            return total == 0 ? 0 : Double(doneThisWeek.count) / Double(total)
+        }
+    }
+
+    func summary(for project: Project?, now: Date = Date()) -> ProjectSummary {
+        let id = project?.id
+        let mine = topCandidates.filter { $0.projectId == id }
+        let overdue = mine.filter { ($0.dueAt ?? .distantFuture) < now }
+        let rest = mine.filter { ($0.dueAt ?? .distantFuture) >= now }
+        let scheduled = rest.filter { nextBlock(for: $0) != nil }
+            .sorted { (nextBlock(for: $0)?.startAt ?? .distantFuture) < (nextBlock(for: $1)?.startAt ?? .distantFuture) }
+        let unscheduled = rest.filter { nextBlock(for: $0) == nil }
+        let weekEnd = now.addingTimeInterval(7 * 86_400)
+        return ProjectSummary(
+            overdue: overdue,
+            scheduled: scheduled,
+            unscheduled: unscheduled,
+            waiting: waitingTasks.filter { $0.projectId == id },
+            doneThisWeek: finishedThisWeek(now: now).first { $0.project?.id == id }?.tasks ?? [],
+            dueThisWeek: rest.filter { ($0.dueAt ?? .distantFuture) < weekEnd }.count,
+            minutesLeft: mine.reduce(0) { $0 + remainingMinutes($1, now: now) }
+        )
+    }
+
+    /// Projects with something wrong (overdue, or work with nothing booked) first.
+    var projectsByAttention: [(project: Project, summary: ProjectSummary)] {
+        let all = liveProjects.map { ($0, summary(for: $0)) }
+        return all.filter { $0.1.needsAttention } + all.filter { !$0.1.needsAttention }
+    }
 }

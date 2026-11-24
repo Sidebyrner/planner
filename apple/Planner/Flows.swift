@@ -31,6 +31,8 @@ struct StepFlow<Content: View>: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(AppModel.self) private var model
     let title: String
+    /// Stamped as done when the last step is finished.
+    var flow: Router.Flow?
     let steps: [String]
     @Binding var step: Int
     var nextLabel: String
@@ -39,10 +41,11 @@ struct StepFlow<Content: View>: View {
     @State private var working = false
 
     init(
-        title: String, steps: [String], step: Binding<Int>, nextLabel: String = "Next",
+        title: String, flow: Router.Flow? = nil, steps: [String], step: Binding<Int>, nextLabel: String = "Next",
         onNext: @escaping (Int) async -> Bool = { _ in true }, @ViewBuilder content: () -> Content
     ) {
         self.title = title
+        self.flow = flow
         self.steps = steps
         _step = step
         self.nextLabel = nextLabel
@@ -99,7 +102,10 @@ struct StepFlow<Content: View>: View {
                             let go = await onNext(step)
                             working = false
                             guard go else { return }
-                            if step == steps.count - 1 { dismiss() } else { withAnimation { step += 1 } }
+                            if step == steps.count - 1 {
+                                flow?.markDone()
+                                dismiss()
+                            } else { withAnimation { step += 1 } }
                         }
                     } label: {
                         if working { ProgressView().frame(minWidth: 120) } else {
@@ -182,6 +188,7 @@ struct PlanDayFlow: View {
     var body: some View {
         StepFlow(
             title: "Plan My Day",
+            flow: .planDay,
             steps: ["Clear leftovers", "Pick your top \(Self.maxPicks)", "Fit them in", "You're set"],
             step: $step,
             nextLabel: nextLabel,
@@ -338,7 +345,7 @@ struct WrapUpFlow: View {
     @State private var step = 0
 
     var body: some View {
-        StepFlow(title: "Wrap Up", steps: ["How did today go?", "Still open", "Loose ends", "Tomorrow"], step: $step) {
+        StepFlow(title: "Wrap Up", flow: .wrapUp, steps: ["How did today go?", "Still open", "Loose ends", "Tomorrow"], step: $step) {
             switch step {
             case 0: blocks
             case 1: stillOpen
@@ -453,7 +460,11 @@ struct FollowUpRoundFlow: View {
                             .foregroundStyle(.secondary).multilineTextAlignment(.center)
                     }
                     Spacer()
-                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent).controlSize(.large)
+                    Button("Done") {
+                        if !queue.isEmpty { Router.Flow.followUps.markDone() }
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent).controlSize(.large)
                 }
             }
             .padding(20)
@@ -544,6 +555,7 @@ struct WeeklyReviewFlow: View {
     var body: some View {
         StepFlow(
             title: "Weekly Review",
+            flow: .weekly,
             steps: ["This week", "Overdue", "Waiting on", "Next week"],
             step: $step,
             nextLabel: step == 2 ? "Plan next week" : "Next",
@@ -660,6 +672,10 @@ struct BoardView: View {
     @State private var askWho: PlannerTask?
     @State private var who = ""
     @State private var target: AppModel.BoardColumn?
+
+    init(projectId: String? = nil) {
+        _projectId = State(initialValue: projectId)
+    }
 
     var body: some View {
         NavigationStack {

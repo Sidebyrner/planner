@@ -60,6 +60,15 @@ struct PlannerCommands: Commands {
             Button("Add by Voice") { router.open(.voice) }
                 .keyboardShortcut("v", modifiers: [.command, .option])
         }
+        #if os(macOS)
+        CommandGroup(before: .sidebar) {
+            ForEach(Array(Router.Place.sidebar.enumerated()), id: \.element) { i, place in
+                Button(place.title) { router.go(place) }
+                    .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: .command)
+            }
+            Divider()
+        }
+        #endif
         CommandMenu("Routines") {
             ForEach(Array(Router.Flow.allCases.enumerated()), id: \.element) { i, flow in
                 Button(flow.title) { router.open(.flow(flow)) }

@@ -38,6 +38,11 @@ struct TodayView: View {
                 .help("Propose blocks for open tasks in today's free time")
             }
             AddToolbar(showFlows: true)
+            #if os(iOS)
+            ToolbarItem(placement: .topBarLeading) {
+                Button { router.open(.settings) } label: { Label("Settings", systemImage: "gear") }
+            }
+            #endif
         }
         .sheet(item: $openTask) { TaskDetailView(task: $0) }
         .sheet(item: $openEvent) { EventDetailView(event: $0) }
@@ -182,15 +187,7 @@ private struct RoutineStrip: View {
     let review: Int
     let chase: Int
 
-    private var suggested: Router.Flow {
-        let hour = Calendar.current.component(.hour, from: now)
-        let weekday = Calendar.current.component(.weekday, from: now) // 1 = Sunday
-        if hour < 12 { return .planDay }
-        if hour >= 18 || review > 2 { return .wrapUp }
-        if weekday == 6 || weekday == 1 { return .weekly }
-        if chase > 0 { return .followUps }
-        return .planDay
-    }
+    private var suggested: Router.Flow { .suggested(now: now, review: review, chase: chase) }
 
     var body: some View {
         let order = [suggested] + Router.Flow.allCases.filter { $0 != suggested }
@@ -220,6 +217,16 @@ private struct RoutineStrip: View {
                     .buttonStyle(.plain)
                     .accessibilityHint(flow.blurb)
                 }
+                Button { router.go(.routines) } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: "square.grid.2x2").font(.headline)
+                        Text("All routines").font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 96, height: 104)
+                    .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+                .buttonStyle(.plain)
             }
         }
         .scrollClipDisabled()

@@ -4,9 +4,6 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(Router.self) private var router
-    /// Opening tab. A launch argument like `-PlannerTab calendar` lands in UserDefaults, which
-    /// is how screenshots and Siri ("What's next") open a specific screen.
-    @State private var tab = UserDefaults.standard.string(forKey: "PlannerTab") ?? "today"
 
     var body: some View {
         @Bindable var model = model
@@ -39,62 +36,73 @@ struct ContentView: View {
             CalendarView().syncBanner()
         }
         #else
-        TabView(selection: $tab) {
+        @Bindable var router = router
+        TabView(selection: $router.place) {
             NavigationStack {
                 TodayView().syncBanner()
             }
-            .tabItem { Label("Today", systemImage: "sun.max") }
-            .tag("today")
+            .tabItem { Label("Today", systemImage: Router.Place.today.symbol) }
+            .tag(Router.Place.today)
 
             NavigationStack {
                 TaskListView().syncBanner()
             }
-            .tabItem { Label("Tasks", systemImage: "checklist") }
-            .tag("tasks")
+            .tabItem { Label("Tasks", systemImage: Router.Place.tasks.symbol) }
+            .tag(Router.Place.tasks)
+
+            NavigationStack {
+                ProjectsHomeView().syncBanner()
+            }
+            .tabItem { Label("Projects", systemImage: Router.Place.projects.symbol) }
+            .tag(Router.Place.projects)
 
             NavigationStack {
                 CalendarView().syncBanner()
             }
-            .tabItem { Label("Calendar", systemImage: "calendar") }
-            .tag("calendar")
+            .tabItem { Label("Calendar", systemImage: Router.Place.calendar.symbol) }
+            .tag(Router.Place.calendar)
 
             NavigationStack {
-                SettingsView()
+                RoutinesView().syncBanner()
             }
-            .tabItem { Label("Settings", systemImage: "gear") }
-            .tag("settings")
+            .tabItem { Label("Routines", systemImage: Router.Place.routines.symbol) }
+            .tag(Router.Place.routines)
         }
         .overlay(alignment: .bottomTrailing) {
-            if tab != "settings" {
-                FloatingAddButton()
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 96)
-                    .transition(.scale.combined(with: .opacity))
-            }
+            FloatingAddButton()
+                .padding(.trailing, 20)
+                .padding(.bottom, 96)
         }
-        .animation(.spring(duration: 0.3), value: tab)
+        .onAppear {
+            // Settings left the tab bar; `-PlannerTab settings` still opens it.
+            if UserDefaults.standard.string(forKey: "PlannerTab") == "settings" { router.open(.settings) }
+        }
         #endif
     }
 }
 
 #if os(macOS)
-/// The Mac sidebar: Today at a glance, or the full task list.
+/// The Mac sidebar: Today, the task list, projects or routines, with the calendar beside it.
 struct SidebarView: View {
-    enum Pane: String, CaseIterable { case today = "Today", tasks = "Tasks" }
-    @State private var pane: Pane = .today
+    @Environment(Router.self) private var router
 
     var body: some View {
+        @Bindable var router = router
         VStack(spacing: 0) {
-            Picker("View", selection: $pane) {
-                ForEach(Pane.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            Picker("View", selection: $router.place) {
+                ForEach(Router.Place.sidebar) { Text($0.title).tag($0) }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            switch pane {
-            case .today: TodayView()
+            switch router.place {
+            case .today, .calendar: TodayView()
             case .tasks: TaskListView()
+            case .projects:
+                // Its own stack, so a project opens in the sidebar with the calendar still beside it.
+                NavigationStack { ProjectsHomeView() }
+            case .routines: RoutinesView()
             }
         }
     }

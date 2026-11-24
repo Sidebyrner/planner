@@ -38,6 +38,60 @@ final class Router {
             case .board: "Every task by status"
             }
         }
+
+        /// The routines you step through, as opposed to the board, which is a tool.
+        static var guided: [Flow] { [.planDay, .wrapUp, .followUps, .weekly] }
+
+        /// The routine that fits the moment: planning in the morning, wrapping up in the evening
+        /// (or once blocks pile up), the weekly review at the weekend, follow-ups otherwise.
+        static func suggested(now: Date, review: Int, chase: Int) -> Flow {
+            let hour = Calendar.current.component(.hour, from: now)
+            let weekday = Calendar.current.component(.weekday, from: now) // 1 = Sunday
+            if hour < 12 { return .planDay }
+            if hour >= 18 || review > 2 { return .wrapUp }
+            if weekday == 6 || weekday == 1 { return .weekly }
+            if chase > 0 { return .followUps }
+            return .planDay
+        }
+
+        private var doneKey: String { "routine.\(rawValue).lastDone" }
+
+        /// When this routine was last finished on this device.
+        var lastDone: Date? { UserDefaults.standard.object(forKey: doneKey) as? Date }
+
+        func markDone(_ date: Date = Date()) { UserDefaults.standard.set(date, forKey: doneKey) }
+
+        /// Finished today, or this week for the weekly review.
+        func isDone(now: Date = Date()) -> Bool {
+            guard let last = lastDone else { return false }
+            if self == .weekly {
+                var calendar = Calendar(identifier: .iso8601)
+                calendar.timeZone = .current
+                return calendar.isDate(last, equalTo: now, toGranularity: .weekOfYear)
+            }
+            return Calendar.current.isDate(last, inSameDayAs: now)
+        }
+    }
+
+    /// The app's main sections: tabs on iPhone, the sidebar picker on the Mac (where the
+    /// calendar is always on the right instead).
+    enum Place: String, CaseIterable, Identifiable {
+        case today, tasks, projects, calendar, routines
+        var id: String { rawValue }
+
+        var title: String { rawValue.capitalized }
+
+        var symbol: String {
+            switch self {
+            case .today: "sun.max"
+            case .tasks: "checklist"
+            case .projects: "folder"
+            case .calendar: "calendar"
+            case .routines: "list.bullet.rectangle.portrait"
+            }
+        }
+
+        static var sidebar: [Place] { [.today, .tasks, .projects, .routines] }
     }
 
     enum Sheet: Identifiable {
@@ -47,6 +101,8 @@ final class Router {
         case voice
         case addTray
         case flow(Flow)
+        case board(projectId: String?)
+        case settings
 
         var id: String {
             switch self {
@@ -56,11 +112,25 @@ final class Router {
             case .voice: "voice"
             case .addTray: "tray"
             case .flow(let f): "flow-\(f.rawValue)"
+            case .board(let id): "board-\(id ?? "all")"
+            case .settings: "settings"
             }
         }
     }
 
     var sheet: Sheet?
+
+    /// The section on screen. A launch argument like `-PlannerTab routines` lands in
+    /// UserDefaults, which is how screenshots and Siri ("What's next") open a specific screen.
+    var place: Place = Place(rawValue: UserDefaults.standard.string(forKey: "PlannerTab") ?? "") ?? .today
+
+    func go(_ place: Place) {
+        #if os(macOS)
+        self.place = place == .calendar ? .today : place
+        #else
+        self.place = place
+        #endif
+    }
 
     func open(_ sheet: Sheet) {
         // Swap sheets cleanly when one opens another (the + tray opening voice).
@@ -90,6 +160,18 @@ struct RouterSheets: ViewModifier {
             case .voice: VoiceCaptureView()
             case .addTray: AddTray()
             case .flow(let flow): FlowView(flow: flow)
+            case .board(let projectId):
+                BoardView(projectId: projectId)
+                #if os(macOS)
+                    .frame(minWidth: 1000, minHeight: 640)
+                #endif
+            case .settings:
+                NavigationStack {
+                    SettingsView()
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("Done") { router.sheet = nil } }
+                        }
+                }
             }
         }
     }
