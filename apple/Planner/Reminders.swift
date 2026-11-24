@@ -10,6 +10,7 @@ enum Reminders {
     private static let limit = 50
 
     static let followUpCategory = "planner.followup"
+    private static let notifiedRepliesKey = "planner.notifiedReplies"
 
     enum Action: String {
         case message = "planner.followup.message"
@@ -76,6 +77,23 @@ enum Reminders {
         for (_, r) in requests.sorted(by: { $0.0 < $1.0 }).prefix(limit) {
             try? await center.add(r)
         }
+
+        // New replies found by the server: tell once, right away.
+        var told = Set(UserDefaults.standard.stringArray(forKey: notifiedRepliesKey) ?? [])
+        for task in tasks where task.hasReply {
+            guard let at = task.repliedAt, now.timeIntervalSince(at) < 2 * 86_400 else { continue }
+            let key = "\(task.id)@\(Int(at.timeIntervalSince1970))"
+            guard !told.contains(key) else { continue }
+            let content = UNMutableNotificationContent()
+            content.title = "\(task.waitingOn ?? "They") replied"
+            content.body = [task.title, task.replySnippet].compactMap { $0 }.joined(separator: " — ")
+            content.sound = .default
+            content.categoryIdentifier = followUpCategory
+            content.userInfo = ["taskId": task.id]
+            try? await center.add(UNNotificationRequest(identifier: "\(prefix)reply.\(task.id)", content: content, trigger: nil))
+            told.insert(key)
+        }
+        UserDefaults.standard.set(Array(told.suffix(200)), forKey: notifiedRepliesKey)
     }
 
     private static func request(_ id: String, _ content: UNNotificationContent, at date: Date) -> UNNotificationRequest {

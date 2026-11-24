@@ -173,6 +173,8 @@ extension AppModel {
         /// Still waiting, follow-up later.
         var pending: [PlannerTask]
         var id: String { name.lowercased() }
+        /// Emailed back on any of these.
+        var hasReply: Bool { due.contains(where: \.hasReply) }
     }
 
     var people: [Person] {
@@ -182,12 +184,18 @@ extension AppModel {
             guard let who = task.waitingOn?.trimmingCharacters(in: .whitespaces), !who.isEmpty else { continue }
             var person = byName[who.lowercased()] ?? Person(name: who, contact: nil, due: [], pending: [])
             person.contact = person.contact ?? task.contact
-            let isDue = task.status == .todo || (task.followUpAt.map { $0 <= now } ?? false)
+            // A reply needs a look now, whatever the follow-up date says.
+            let isDue = task.hasReply || task.status == .todo || (task.followUpAt.map { $0 <= now } ?? false)
             if isDue { person.due.append(task) } else { person.pending.append(task) }
             byName[who.lowercased()] = person
         }
-        return byName.values.sorted { a, b in
-            a.due.count != b.due.count ? a.due.count > b.due.count : a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        return byName.values.map { p in
+            var p = p
+            p.due.sort { ($0.hasReply ? 0 : 1) < ($1.hasReply ? 0 : 1) }
+            return p
+        }.sorted { a, b in
+            if a.hasReply != b.hasReply { return a.hasReply }
+            return a.due.count != b.due.count ? a.due.count > b.due.count : a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
         }
     }
 

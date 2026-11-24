@@ -341,6 +341,7 @@ export function App() {
         <SettingsDialog
           settings={state.settings}
           google={state.google}
+          gmail={state.gmail}
           canSignOut={loginRequired}
           onClose={() => setSettingsOpen(false)}
           onSave={async (patch) => {
@@ -349,6 +350,8 @@ export function App() {
           }}
           onSync={() => actStrict(() => api('POST', '/google/sync'))}
           onDisconnect={() => actStrict(() => api('POST', '/google/disconnect'))}
+          onCheckReplies={() => actStrict(() => api('POST', '/gmail/check'))}
+          onDisconnectGmail={() => actStrict(() => api('POST', '/gmail/disconnect'))}
           onSignOut={() => api('POST', '/logout').then(() => setAuth('out'))}
         />
       )}

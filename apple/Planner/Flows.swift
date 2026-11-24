@@ -542,6 +542,12 @@ struct FollowUpRoundFlow: View {
                 Spacer()
             }
             Text(task.title).font(.title2.weight(.bold))
+            if task.hasReply, let at = task.repliedAt {
+                Label("Replied \(Format.relative(at))", systemImage: "envelope.open.fill")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+                if let snippet = task.replySnippet, !snippet.isEmpty { ReplyQuote(text: snippet) }
+            }
             Text([
                 "Waiting since \(task.createdAt.formatted(.dateTime.month().day()))",
                 task.followUpAt.map { "follow-up was \(Format.relative($0))" },

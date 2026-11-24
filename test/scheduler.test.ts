@@ -12,7 +12,8 @@ const task = (p: Partial<Task>): Task => ({
   id: `t${++n}`, title: `Task ${n}`, notes: '', status: 'todo', priority: 2, estimateMin: 60,
   dueAt: null, createdAt: `2026-11-20T00:00:0${n % 10}Z`, completedAt: null,
   projectId: null, checklist: [], waitingOn: null, followUpAt: null,
-  links: [], contact: null, source: null, externalRef: null, recurrence: null, seriesId: null, showFrom: null, ...p,
+  links: [], contact: null, source: null, externalRef: null, recurrence: null, seriesId: null, showFrom: null,
+  waitingSince: null, repliedAt: null, replySnippet: null, ...p,
 });
 const event = (startAt: string, endAt: string, p: Partial<CalEvent> = {}): CalEvent => ({
   id: `e${++n}`, title: 'Meeting', notes: '', startAt, endAt, allDay: false, taskId: null, googleId: null, externalId: null,

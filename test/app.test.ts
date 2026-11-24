@@ -8,6 +8,7 @@ import { createApp } from '../src/server/app.js';
 /** A stand-in for Google's token and Calendar endpoints. */
 function fakeGoogle() {
   const events = new Map<string, any>();
+  const mail: { id: string; from: string; internalDate: number; snippet: string }[] = [];
   const calls: string[] = [];
   let seq = 0;
   const fetchFn = (async (input: any, init: any = {}) => {
@@ -16,6 +17,15 @@ function fakeGoogle() {
     calls.push(`${method} ${url.pathname}`);
     const json = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status });
     if (url.hostname === 'oauth2.googleapis.com') return json({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 });
+    if (url.hostname === 'gmail.googleapis.com') {
+      const msgId = url.pathname.split('/messages/')[1];
+      if (msgId) return json(mail.find((m) => m.id === decodeURIComponent(msgId)) ?? {});
+      const q = url.searchParams.get('q') ?? '';
+      const from = /from:(\S+)/.exec(q)?.[1];
+      const after = Number(/after:(\d+)/.exec(q)?.[1] ?? 0);
+      const hits = mail.filter((m) => m.from === from && m.internalDate / 1000 >= after).sort((a, b) => b.internalDate - a.internalDate);
+      return json(hits.length ? { messages: hits.map((m) => ({ id: m.id })) } : {});
+    }
     const id = decodeURIComponent(url.pathname.split('/events/')[1] ?? '');
     if (method === 'GET') return json({ items: [...events.values()] });
     if (method === 'POST') {
@@ -30,7 +40,7 @@ function fakeGoogle() {
     if (method === 'DELETE') return events.delete(id) ? json(null, 204) : json({ error: { message: 'Not Found' } }, 404);
     return json({}, 400);
   }) as typeof fetch;
-  return { events, calls, fetchFn };
+  return { events, mail, calls, fetchFn };
 }
 
 let server: Server;
@@ -559,5 +569,74 @@ describe('device sync (iOS and macOS apps)', () => {
     await startWithDevice();
     expect((await sync({ events: [{ title: 'no id', startAt: inDays(1, 1), endAt: inDays(1, 2) }] })).status).toBe(400);
     expect((await sync({ from: inDays(2, 0), to: inDays(1, 0) })).status).toBe(400);
+  });
+});
+
+describe('Gmail replies', () => {
+  async function connectGmail() {
+    const begin = await api('GET', '/api/gmail/connect');
+    const state = new URL(begin.headers.get('location')!).searchParams.get('state')!;
+    expect(state.startsWith('gmail.')).toBe(true);
+    const done = await api('GET', `/api/google/callback?code=abc&state=${state}`);
+    expect(done.status).toBe(302);
+  }
+
+  async function waitingTask(email = 'sam@example.com') {
+    const { body } = await api('POST', '/api/tasks', {
+      title: 'Quote for the backsplash',
+      status: 'waiting',
+      waitingOn: 'Sam',
+      contact: { name: 'Sam', email },
+    });
+    expect(body.waitingSince).toBeTruthy();
+    return body;
+  }
+
+  it('connects on its own, leaving the calendar alone', async () => {
+    await connectGmail();
+    const { body } = await api('GET', '/api/state');
+    expect(body.gmail.connected).toBe(true);
+    expect(body.google.connected).toBe(false);
+  });
+
+  it('marks a follow-up replied when the person emails back, and forgets it when chased again', async () => {
+    await connectGmail();
+    const task = await waitingTask();
+    google.mail.push({ id: 'old', from: 'sam@example.com', internalDate: Date.parse(task.waitingSince) - 3600_000, snippet: 'An older thread' });
+    google.mail.push({ id: 'm1', from: 'sam@example.com', internalDate: Date.now() + 1000, snippet: 'Here&#39;s the quote &amp; dates' });
+    google.mail.push({ id: 'm2', from: 'someone@else.com', internalDate: Date.now() + 2000, snippet: 'Not Sam' });
+
+    const { body: state } = await api('POST', '/api/gmail/check');
+    const replied = state.tasks.find((t: any) => t.id === task.id);
+    expect(replied.repliedAt).toBeTruthy();
+    expect(replied.replySnippet).toBe("Here's the quote & dates");
+    expect(state.gmail.lastCheckAt).toBeTruthy();
+
+    // Chasing again (a new follow-up date while still waiting) starts a fresh wait.
+    const { body: chased } = await api('PATCH', `/api/tasks/${task.id}`, { followUpAt: new Date(Date.now() + 2 * 86400_000).toISOString() });
+    expect(chased.repliedAt).toBeNull();
+    expect(Date.parse(chased.waitingSince)).toBeGreaterThan(Date.parse(task.waitingSince) - 1);
+
+    // Done clears it all.
+    const { body: done } = await api('PATCH', `/api/tasks/${task.id}`, { status: 'done' });
+    expect(done.waitingSince).toBeNull();
+  });
+
+  it('ignores mail from before the wait began and follow-ups without an email', async () => {
+    await connectGmail();
+    const task = await waitingTask();
+    google.mail.push({ id: 'old', from: 'sam@example.com', internalDate: Date.parse(task.waitingSince) - 3600_000, snippet: 'Earlier' });
+    const noEmail = (await api('POST', '/api/tasks', { title: 'Call back', status: 'waiting', waitingOn: 'Ana' })).body;
+    const { body: state } = await api('POST', '/api/gmail/check');
+    expect(state.tasks.find((t: any) => t.id === task.id).repliedAt).toBeNull();
+    expect(state.tasks.find((t: any) => t.id === noEmail.id).repliedAt).toBeNull();
+    expect(google.calls.some((c) => c.includes('/messages'))).toBe(true);
+  });
+
+  it('does nothing when Gmail is not connected', async () => {
+    await waitingTask();
+    const { body: state } = await api('POST', '/api/gmail/check');
+    expect(state.gmail.connected).toBe(false);
+    expect(google.calls.some((c) => c.includes('/messages'))).toBe(false);
   });
 });

@@ -96,6 +96,15 @@ Planner syncs your primary calendar, from two weeks back to sixty days ahead. It
 
 While the consent screen is in "Testing" mode, Google expires the connection after seven days. Publish the app (no review is needed for personal use with your own account) to keep it connected.
 
+## Notice Gmail replies to follow-ups
+
+Planner can watch for an email back from someone you're waiting on, and mark that follow-up **Replied** (with the start of their email) on every device. It's read-only and separate from Google Calendar, so connecting it doesn't change where your calendar comes from.
+
+1. In the same Google Cloud project, enable the **Gmail API** and add the scope `https://www.googleapis.com/auth/gmail.readonly` to the consent screen. Gmail uses the same client ID, secret and redirect URI as Calendar.
+2. Open Settings in the web app and choose **Connect Gmail**.
+
+Planner checks every ten minutes (and when you open the app) for mail from each waiting follow-up's email address, sent after the wait began or after you last chased them. Follow-ups without an email address aren't checked. Text messages can't be read by any app on iOS, so replies by text still need a tap on **Got it**.
+
 ## Host it
 
 Any host that runs a Docker container with a persistent disk works. For Fly.io:

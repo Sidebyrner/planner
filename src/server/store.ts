@@ -93,6 +93,9 @@ const toTask = (r: Row): Task => ({
   recurrence: parseJson<Recurrence | null>(r.recurrence, null),
   seriesId: r.series_id ?? null,
   showFrom: r.show_from ?? null,
+  waitingSince: r.waiting_since ?? null,
+  repliedAt: r.replied_at ?? null,
+  replySnippet: r.reply_snippet ?? null,
 });
 
 const toEvent = (r: Row): CalEvent => ({
@@ -202,6 +205,9 @@ export class Store {
       recurrence: 'TEXT',
       series_id: 'TEXT',
       show_from: 'TEXT',
+      waiting_since: 'TEXT',
+      replied_at: 'TEXT',
+      reply_snippet: 'TEXT',
     });
     addColumns('projects', { links: "TEXT NOT NULL DEFAULT '[]'" });
     this.db.exec(`
@@ -399,6 +405,17 @@ export class Store {
         next.showFrom ? iso(next.showFrom) : null,
         id,
       );
+    return this.getTask(id);
+  }
+
+  /** Server-managed follow-up fields, kept out of TaskInput so clients can't set them. */
+  setFollowUpState(id: string, state: { waitingSince?: string | null; repliedAt?: string | null; replySnippet?: string | null }): Task | null {
+    const cur = this.getTask(id);
+    if (!cur) return null;
+    const next = { waitingSince: cur.waitingSince, repliedAt: cur.repliedAt, replySnippet: cur.replySnippet, ...state };
+    this.db
+      .prepare('UPDATE tasks SET waiting_since = ?, replied_at = ?, reply_snippet = ? WHERE id = ?')
+      .run(next.waitingSince, next.repliedAt, next.replySnippet, id);
     return this.getTask(id);
   }
 

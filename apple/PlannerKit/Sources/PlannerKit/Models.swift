@@ -153,12 +153,20 @@ public struct PlannerTask: Codable, Identifiable, Hashable, Sendable {
     public var seriesId: String? = nil
     /// A repeating task stays out of sight until this time (its lead time).
     public var showFrom: Date? = nil
+    /// When the current wait (or the last chase) began. Set by the server.
+    public var waitingSince: Date? = nil
+    /// When the person emailed back, found by the server through Gmail.
+    public var repliedAt: Date? = nil
+    /// The start of that email.
+    public var replySnippet: String? = nil
 
     public var isDone: Bool { status == .done }
     public var repeats: Bool { recurrence != nil }
     /// Not shown yet: a repeating task still waiting for its lead time.
     public func isUpcoming(now: Date = Date()) -> Bool { showFrom.map { $0 > now } ?? false }
     public var isWaiting: Bool { status == .waiting }
+    /// They emailed back since the wait began.
+    public var hasReply: Bool { repliedAt != nil && !isDone }
     public var checklistProgress: String? {
         checklist.isEmpty ? nil : "\(checklist.filter(\.done).count)/\(checklist.count)"
     }
@@ -168,6 +176,7 @@ extension PlannerTask {
     private enum CodingKeys: String, CodingKey {
         case id, title, notes, status, priority, estimateMin, dueAt, createdAt, completedAt, projectId, checklist, waitingOn, followUpAt
         case links, contact, source, externalRef, recurrence, seriesId, showFrom
+        case waitingSince, repliedAt, replySnippet
     }
 
     /// Fields added later are optional, so a cache or server from before them still decodes.
@@ -194,6 +203,9 @@ extension PlannerTask {
         recurrence = try? c.decodeIfPresent(Recurrence.self, forKey: .recurrence)
         seriesId = try c.decodeIfPresent(String.self, forKey: .seriesId)
         showFrom = try c.decodeIfPresent(Date.self, forKey: .showFrom)
+        waitingSince = try c.decodeIfPresent(Date.self, forKey: .waitingSince)
+        repliedAt = try c.decodeIfPresent(Date.self, forKey: .repliedAt)
+        replySnippet = try c.decodeIfPresent(String.self, forKey: .replySnippet)
     }
 }
 

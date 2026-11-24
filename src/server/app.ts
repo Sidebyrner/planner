@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { apiRouter } from './api.js';
 import { Auth, type AuthConfig } from './auth.js';
-import { GoogleCalendar, type GoogleConfig } from './google.js';
+import { Gmail, GoogleCalendar, type GoogleConfig } from './google.js';
 import { mcpHandler } from './mcp.js';
 import { Planner } from './planner.js';
 import { Store } from './store.js';
@@ -24,7 +24,8 @@ export interface AppConfig {
 export function createApp(config: AppConfig): { app: Express; planner: Planner; watcher: BlockWatcher | null } {
   const store = new Store(config.dbPath);
   const google = new GoogleCalendar(store, config.google, config.fetchFn);
-  const planner = new Planner(store, google);
+  const gmail = new Gmail(store, config.google, config.fetchFn);
+  const planner = new Planner(store, google, gmail);
   const auth = new Auth(config.auth);
 
   const app = express();

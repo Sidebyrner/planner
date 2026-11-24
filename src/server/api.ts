@@ -163,11 +163,13 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
       to: new Date(Date.now() + 120 * 86400_000).toISOString(),
     }),
     settings: planner.getSettings(),
+    gmail: planner.gmail?.status() ?? { configured: false, connected: false, lastCheckAt: null, error: null },
     google: planner.google.status(),
   });
 
   r.get('/state', h(async () => {
     await planner.syncIfStale().catch(() => {});
+    await planner.checkRepliesIfStale().catch(() => {});
     planner.resurfaceWaiting();
     return state();
   }));
@@ -218,17 +220,37 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     res.redirect(planner.google.authUrl(state));
   });
 
+  // Gmail uses the same Google app and callback; the state says which sign-in it was.
+  r.get('/gmail/connect', (req, res) => {
+    if (!planner.gmail?.configured) return void res.status(400).send('Google is not set up on this server. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+    const state = `gmail.${randomToken()}`;
+    res.cookie('planner_oauth', state, { httpOnly: true, sameSite: 'lax', maxAge: 10 * 60 * 1000 });
+    res.redirect(planner.gmail.authUrl(state));
+  });
+
+  r.post('/gmail/check', h(async () => {
+    await planner.checkReplies();
+    return state();
+  }));
+
+  r.post('/gmail/disconnect', h(() => planner.gmail?.disconnect()));
+
   r.get('/google/callback', async (req, res) => {
     const { code, state, error } = req.query as Record<string, string | undefined>;
     res.clearCookie('planner_oauth');
     try {
       if (error) throw new Error(`Google declined the connection (${error}).`);
       if (!code || !state || state !== req.cookies?.planner_oauth) throw new Error('The connection attempt expired. Start again from Settings.');
-      await planner.google.exchangeCode(code);
-      await planner.sync();
+      if (state.startsWith('gmail.') && planner.gmail) {
+        await planner.gmail.exchangeCode(code);
+        await planner.checkReplies();
+      } else {
+        await planner.google.exchangeCode(code);
+        await planner.sync();
+      }
       res.redirect('/');
     } catch (err) {
-      planner.store.setValue('google_error', (err as Error).message);
+      planner.store.setValue(state?.startsWith('gmail.') ? 'gmail_error' : 'google_error', (err as Error).message);
       res.redirect('/');
     }
   });

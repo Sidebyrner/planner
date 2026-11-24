@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { checklistFromNotes } from '../shared/checklist';
-import { PROJECT_COLORS, type CalEvent, type ChecklistItem, type GoogleStatus, type Project, type ProjectColor, type Settings, type Task, type TimeWindow } from '../shared/types';
+import { PROJECT_COLORS, type CalEvent, type ChecklistItem, type GmailStatus, type GoogleStatus, type Project, type ProjectColor, type Settings, type Task, type TimeWindow } from '../shared/types';
 import { projectLabel, projectStyle } from './projects';
 import { fmtWhen, fromLocalInput, toLocalInput } from './util';
 
@@ -519,14 +519,17 @@ function ProjectForm(props: {
 export function SettingsDialog(props: {
   settings: Settings;
   google: GoogleStatus;
+  gmail: GmailStatus;
   canSignOut: boolean;
   onSave: (patch: Partial<Settings>) => Promise<void>;
   onSync: () => Promise<void>;
   onDisconnect: () => Promise<void>;
+  onCheckReplies: () => Promise<void>;
+  onDisconnectGmail: () => Promise<void>;
   onSignOut: () => void;
   onClose: () => void;
 }) {
-  const { google } = props;
+  const { google, gmail } = props;
   const [s, setS] = useState(props.settings);
   const [copied, setCopied] = useState(false);
   const { busy, error, run, onSubmit } = useSubmit(() => props.onSave({ ...s, timezoneConfirmed: true }));
@@ -616,6 +619,38 @@ export function SettingsDialog(props: {
           </>
         )}
         {google.error && <p className="form-error">{google.error}</p>}
+
+        <h3>Gmail replies</h3>
+        {!gmail.configured ? (
+          <p className="hint">Uses the same Google setup as Google Calendar (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET).</p>
+        ) : gmail.connected ? (
+          <>
+            <p className="hint">
+              Watching for emails from people you're waiting on.{' '}
+              {gmail.lastCheckAt ? `Last checked ${fmtWhen(gmail.lastCheckAt)}.` : 'Not checked yet.'}
+            </p>
+            <div className="row-btns">
+              <button type="button" className="btn" disabled={busy} onClick={() => run(props.onCheckReplies)}>
+                Check now
+              </button>
+              <button type="button" className="btn btn-danger" disabled={busy} onClick={() => run(props.onDisconnectGmail)}>
+                Disconnect
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="hint">
+              Read-only. When someone you're waiting on emails you back, their follow-up is marked “replied” on every device.
+              Only works for follow-ups with the person's email address. Separate from Google Calendar, so it doesn't change
+              where your calendar comes from.
+            </p>
+            <a className="btn" href="/api/gmail/connect">
+              Connect Gmail
+            </a>
+          </>
+        )}
+        {gmail.error && <p className="form-error">{gmail.error}</p>}
 
         <h3>Agents</h3>
         <p className="hint">Point Claude or any MCP client at this address, sending your MCP token as a bearer token.</p>

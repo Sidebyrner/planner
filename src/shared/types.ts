@@ -77,6 +77,12 @@ export interface Task {
   seriesId: string | null;
   /** Not shown or scheduled before this time (a repeating task's lead time). */
   showFrom: string | null;
+  /** When the current wait (or the last chase) began; replies are looked for after this. */
+  waitingSince: string | null;
+  /** When the person you're waiting on emailed back, found through Gmail. */
+  repliedAt: string | null;
+  /** The start of that email. */
+  replySnippet: string | null;
 }
 
 /** A weekly window, e.g. weekdays 06:45–08:15, in the user's timezone. */
@@ -229,10 +235,18 @@ export interface GoogleStatus {
   error: string | null;
 }
 
+export interface GmailStatus {
+  configured: boolean;
+  connected: boolean;
+  lastCheckAt: string | null;
+  error: string | null;
+}
+
 export interface AppState {
   tasks: Task[];
   events: CalEvent[];
   projects: Project[];
   settings: Settings;
   google: GoogleStatus;
+  gmail: GmailStatus;
 }

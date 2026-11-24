@@ -524,7 +524,8 @@ struct PersonCard: View {
                 Avatar(name: person.name)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(person.name).font(.body.weight(.semibold))
-                    Text(summary).font(.caption).foregroundStyle(person.due.isEmpty ? Color.secondary : Color.red)
+                    Text(summary).font(.caption.weight(person.hasReply ? .semibold : .regular))
+                        .foregroundStyle(person.hasReply ? Color.green : person.due.isEmpty ? Color.secondary : Color.red)
                 }
                 Spacer()
                 ContactIcons(contact: person.contact, task: person.due.first ?? person.pending.first)
@@ -537,7 +538,10 @@ struct PersonCard: View {
 
     private var summary: String {
         var parts: [String] = []
-        if !person.due.isEmpty { parts.append("\(person.due.count) to chase") }
+        let replied = person.due.filter(\.hasReply).count
+        if replied > 0 { parts.append("replied") }
+        let chase = person.due.count - replied
+        if chase > 0 { parts.append("\(chase) to chase") }
         if !person.pending.isEmpty { parts.append("\(person.pending.count) waiting") }
         return parts.joined(separator: " · ")
     }
@@ -554,7 +558,12 @@ struct FollowUpRow: View {
             Button(action: onOpen) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(task.title).font(.subheadline.weight(.medium)).foregroundStyle(.primary).lineLimit(2)
-                    if let since = task.followUpAt {
+                    if task.hasReply, let at = task.repliedAt {
+                        Label("Replied \(Format.relative(at))", systemImage: "envelope.open.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.green)
+                            .labelStyle(.titleAndIcon)
+                    } else if let since = task.followUpAt {
                         Text("follow-up was \(Format.relative(since))").font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -562,10 +571,18 @@ struct FollowUpRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            if task.hasReply, let snippet = task.replySnippet, !snippet.isEmpty {
+                ReplyQuote(text: snippet)
+            }
             HStack(spacing: 8) {
-                Button { router.open(.nudge(taskId: task.id)) } label: { Label("Nudge", systemImage: "text.bubble") }
+                if task.hasReply {
+                    Button { Task { await model.gotIt(task) } } label: { Label("Got it", systemImage: "checkmark") }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.green)
+                }
+                Button { router.open(.nudge(taskId: task.id)) } label: { Label(task.hasReply ? "Reply" : "Nudge", systemImage: "text.bubble") }
                     .buttonStyle(.borderedProminent)
-                    .tint(.indigo)
+                    .tint(task.hasReply ? .secondary : .indigo)
                 Menu {
                     Button("Check again tomorrow") { Task { await model.snooze(task, days: 1) } }
                     Button("Check again in 3 days") { Task { await model.snooze(task, days: 3) } }
@@ -575,9 +592,11 @@ struct FollowUpRow: View {
                 }
                 .menuStyle(.button)
                 .buttonStyle(.bordered)
-                Button { Task { await model.gotIt(task) } } label: { Label("Got it", systemImage: "checkmark") }
-                    .buttonStyle(.bordered)
-                    .tint(.green)
+                if !task.hasReply {
+                    Button { Task { await model.gotIt(task) } } label: { Label("Got it", systemImage: "checkmark") }
+                        .buttonStyle(.bordered)
+                        .tint(.green)
+                }
             }
             .buttonBorderShape(.capsule)
             .controlSize(.small)
@@ -585,6 +604,26 @@ struct FollowUpRow: View {
             .font(.caption.weight(.semibold))
         }
         .padding(.leading, 44)
+    }
+}
+
+/// The start of an email they sent back, quoted.
+struct ReplyQuote: View {
+    let text: String
+
+    var body: some View {
+        Text("“\(text)”")
+            .font(.callout)
+            .foregroundStyle(.primary)
+            .lineLimit(3)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2).fill(Color.green).frame(width: 3).padding(.vertical, 6)
+            }
+            .accessibilityLabel("They wrote: \(text)")
     }
 }
 

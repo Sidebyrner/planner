@@ -1,11 +1,13 @@
 import { DateTime } from 'luxon';
-import type { CalEvent, GoogleStatus } from '../shared/types.js';
+import type { CalEvent, GmailStatus, GoogleStatus } from '../shared/types.js';
 import type { Store } from './store.js';
 
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API = 'https://www.googleapis.com/calendar/v3';
 const SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 const CALENDAR = 'primary';
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -24,16 +26,17 @@ export interface GoogleConfig {
 type FetchFn = typeof fetch;
 
 /**
- * Two-way sync with the user's primary Google Calendar.
- *
- * Pull: events in a rolling window are mirrored into the local table, keyed by Google's id.
- * Push: anything created, moved or deleted in Planner is written through to Google.
+ * Sign-in to one Google service, with its own tokens. Calendar and Gmail are connected
+ * separately, so turning on reply checks never changes where the calendar comes from.
  */
-export class GoogleCalendar {
+class GoogleAccount {
   constructor(
-    private store: Store,
-    private config: GoogleConfig,
-    private fetchFn: FetchFn = fetch,
+    protected store: Store,
+    protected config: GoogleConfig,
+    protected fetchFn: FetchFn,
+    private tokenKey: string,
+    private scope: string,
+    private errorKey: string,
   ) {}
 
   get configured(): boolean {
@@ -41,16 +44,7 @@ export class GoogleCalendar {
   }
 
   get connected(): boolean {
-    return this.configured && !!this.store.getValue<Tokens>('google_tokens');
-  }
-
-  status(): GoogleStatus {
-    return {
-      configured: this.configured,
-      connected: this.connected,
-      lastSyncAt: this.store.getValue<string>('google_last_sync'),
-      error: this.store.getValue<string>('google_error'),
-    };
+    return this.configured && !!this.store.getValue<Tokens>(this.tokenKey);
   }
 
   authUrl(state: string): string {
@@ -58,7 +52,7 @@ export class GoogleCalendar {
       client_id: this.config.clientId!,
       redirect_uri: this.config.redirectUri,
       response_type: 'code',
-      scope: SCOPE,
+      scope: this.scope,
       access_type: 'offline',
       prompt: 'consent',
       state,
@@ -74,16 +68,11 @@ export class GoogleCalendar {
     });
     if (!data.refresh_token) throw new Error('Google did not return a refresh token. Remove Planner under your Google account permissions and connect again.');
     this.saveTokens(data, data.refresh_token);
-    this.store.setValue('google_error', null);
+    this.store.setValue(this.errorKey, null);
   }
 
-  disconnect(): void {
-    this.store.setValue('google_tokens', null);
-    this.store.setValue('google_last_sync', null);
-    this.store.setValue('google_error', null);
-    // Mirrored Google events go away; things made in Planner stay, unlinked.
-    this.store.db.prepare("DELETE FROM events WHERE source = 'google'").run();
-    this.store.db.prepare('UPDATE events SET google_id = NULL').run();
+  protected clearTokens(): void {
+    this.store.setValue(this.tokenKey, null);
   }
 
   private async tokenRequest(body: Record<string, string>): Promise<any> {
@@ -107,18 +96,48 @@ export class GoogleCalendar {
       refreshToken,
       expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
     };
-    this.store.setValue('google_tokens', tokens);
+    this.store.setValue(this.tokenKey, tokens);
     return tokens;
   }
 
-  private async accessToken(): Promise<string> {
-    let tokens = this.store.getValue<Tokens>('google_tokens');
-    if (!tokens) throw new Error('Google Calendar is not connected.');
+  protected async accessToken(): Promise<string> {
+    let tokens = this.store.getValue<Tokens>(this.tokenKey);
+    if (!tokens) throw new Error('Google is not connected.');
     if (tokens.expiresAt - 60_000 < Date.now()) {
       const data = await this.tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken });
       tokens = this.saveTokens(data, tokens.refreshToken);
     }
     return tokens.accessToken;
+  }
+}
+
+/**
+ * Two-way sync with the user's primary Google Calendar.
+ *
+ * Pull: events in a rolling window are mirrored into the local table, keyed by Google's id.
+ * Push: anything created, moved or deleted in Planner is written through to Google.
+ */
+export class GoogleCalendar extends GoogleAccount {
+  constructor(store: Store, config: GoogleConfig, fetchFn: FetchFn = fetch) {
+    super(store, config, fetchFn, 'google_tokens', SCOPE, 'google_error');
+  }
+
+  status(): GoogleStatus {
+    return {
+      configured: this.configured,
+      connected: this.connected,
+      lastSyncAt: this.store.getValue<string>('google_last_sync'),
+      error: this.store.getValue<string>('google_error'),
+    };
+  }
+
+  disconnect(): void {
+    this.clearTokens();
+    this.store.setValue('google_last_sync', null);
+    this.store.setValue('google_error', null);
+    // Mirrored Google events go away; things made in Planner stay, unlinked.
+    this.store.db.prepare("DELETE FROM events WHERE source = 'google'").run();
+    this.store.db.prepare('UPDATE events SET google_id = NULL').run();
   }
 
   private async api(method: string, path: string, body?: unknown): Promise<any> {
@@ -217,4 +236,64 @@ export class GoogleCalendar {
     this.store.setValue('google_error', null);
     return { upserted, removed };
   }
+}
+
+export interface Reply {
+  at: string;
+  snippet: string;
+}
+
+/**
+ * Read-only Gmail access, used for one thing: noticing when someone you're waiting on has
+ * emailed you back. It never sends, changes or stores mail beyond a short snippet.
+ */
+export class Gmail extends GoogleAccount {
+  constructor(store: Store, config: GoogleConfig, fetchFn: FetchFn = fetch) {
+    super(store, config, fetchFn, 'gmail_tokens', GMAIL_SCOPE, 'gmail_error');
+  }
+
+  status(): GmailStatus {
+    return {
+      configured: this.configured,
+      connected: this.connected,
+      lastCheckAt: this.store.getValue<string>('gmail_last_check'),
+      error: this.store.getValue<string>('gmail_error'),
+    };
+  }
+
+  disconnect(): void {
+    this.clearTokens();
+    this.store.setValue('gmail_last_check', null);
+    this.store.setValue('gmail_error', null);
+  }
+
+  private async get(path: string): Promise<any> {
+    const res = await this.fetchFn(`${GMAIL_API}${path}`, { headers: { authorization: `Bearer ${await this.accessToken()}` } });
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(`Gmail: ${data?.error?.message || res.status}`);
+    return data;
+  }
+
+  /** The newest email from `email` received after `since`, if any. */
+  async findReply(email: string, since: string): Promise<Reply | null> {
+    const after = Math.floor(Date.parse(since) / 1000);
+    const q = `from:${email} after:${after}`;
+    const list = await this.get(`/messages?${new URLSearchParams({ q, maxResults: '1' })}`);
+    const id = list.messages?.[0]?.id;
+    if (!id) return null;
+    const msg = await this.get(`/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Subject`);
+    const at = msg.internalDate ? new Date(Number(msg.internalDate)).toISOString() : new Date().toISOString();
+    // Gmail's search is by day; drop anything from before the wait actually began.
+    if (Date.parse(at) < Date.parse(since)) return null;
+    return { at, snippet: decodeEntities(String(msg.snippet ?? '')).slice(0, 280) };
+  }
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
 }

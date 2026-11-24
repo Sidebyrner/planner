@@ -1,6 +1,6 @@
 import { seriesKey, type CalEvent, type Captured, type FreeSlot, type Project, type ScheduleProposal, type Settings, type Task } from '../shared/types.js';
 import { matchProject, parseCapture } from './capture.js';
-import type { GoogleCalendar } from './google.js';
+import type { Gmail, GoogleCalendar } from './google.js';
 import { nextDue, showFromFor } from './recurrence.js';
 import { batchTitle, busyMatcher, findFreeSlots, ignoreMatcher, proposeSchedule } from './scheduler.js';
 import type { EventInput, ProjectInput, Store, TaskInput } from './store.js';
@@ -42,6 +42,7 @@ export class Planner {
   constructor(
     readonly store: Store,
     readonly google: GoogleCalendar,
+    readonly gmail?: Gmail,
   ) {}
 
   // Google is best-effort: a failed write-through never loses the local change.
@@ -104,7 +105,8 @@ export class Planner {
     if (input.recurrence && input.showFrom === undefined) {
       input = { ...input, showFrom: showFromFor(input.recurrence, input.dueAt, this.store.getSettings().timezone) };
     }
-    return this.store.createTask(input);
+    const task = this.store.createTask(input);
+    return task.status === 'waiting' ? this.store.setFollowUpState(task.id, { waitingSince: task.createdAt })! : task;
   }
 
   async updateTask(id: string, patch: TaskInput): Promise<Task> {
@@ -113,8 +115,9 @@ export class Planner {
     if (before && patch.status === 'waiting' && !patch.followUpAt && !before.followUpAt) {
       patch = { ...patch, followUpAt: new Date(Date.now() + 2 * 86400_000).toISOString() };
     }
-    const task = this.store.updateTask(id, patch);
+    let task = this.store.updateTask(id, patch);
     if (!before || !task) throw new NotFound(`No task with id ${id}`);
+    task = this.trackWaiting(before, task);
 
     const now = new Date().toISOString();
     const blocks = this.store.blocksForTask(id, { from: now });
@@ -181,6 +184,58 @@ export class Planner {
       else this.store.updateEvent(b.id, { taskIds: rest, title: batchTitle(rest.length) });
     }
     if (!this.store.deleteTask(id)) throw new NotFound(`No task with id ${id}`);
+  }
+
+  /**
+   * A new wait starts when a task is handed to someone or chased again (pushed back while
+   * waiting): look for replies from then on, and forget any earlier one. Finishing or no
+   * longer waiting on anyone clears it.
+   */
+  private trackWaiting(before: Task, task: Task): Task {
+    if (!task.waitingOn || task.status === 'done') {
+      return task.waitingSince || task.repliedAt
+        ? this.store.setFollowUpState(task.id, { waitingSince: null, repliedAt: null, replySnippet: null })!
+        : task;
+    }
+    const startedWaiting = task.status === 'waiting' && before.status !== 'waiting';
+    const chasedAgain = task.status === 'waiting' && before.status === 'waiting' && task.followUpAt !== before.followUpAt;
+    if (startedWaiting || chasedAgain) {
+      return this.store.setFollowUpState(task.id, { waitingSince: new Date().toISOString(), repliedAt: null, replySnippet: null })!;
+    }
+    return task;
+  }
+
+  /**
+   * Look in Gmail for an email from each person you're waiting on (those with an email
+   * address) since the wait began. Returns the tasks that just got a reply.
+   */
+  async checkReplies(now = new Date()): Promise<Task[]> {
+    const gmail = this.gmail;
+    if (!gmail?.connected) return [];
+    const waiting = this.store
+      .listTasks()
+      .filter((t) => t.waitingOn && t.status !== 'done' && !t.repliedAt && t.contact?.email?.includes('@'))
+      .slice(0, 40);
+    const found: Task[] = [];
+    try {
+      for (const t of waiting) {
+        const reply = await gmail.findReply(t.contact!.email!.trim(), t.waitingSince ?? t.createdAt);
+        if (reply) found.push(this.store.setFollowUpState(t.id, { repliedAt: reply.at, replySnippet: reply.snippet })!);
+      }
+      this.store.setValue('gmail_error', null);
+    } catch (err) {
+      this.store.setValue('gmail_error', (err as Error).message);
+    }
+    this.store.setValue('gmail_last_check', now.toISOString());
+    return found;
+  }
+
+  /** Check replies if the last check is older than `maxAgeMs`. */
+  async checkRepliesIfStale(maxAgeMs = 10 * 60 * 1000): Promise<void> {
+    if (!this.gmail?.connected) return;
+    const last = this.gmail.status().lastCheckAt;
+    if (last && Date.now() - Date.parse(last) < maxAgeMs) return;
+    await this.checkReplies();
   }
 
   /** Waiting tasks whose follow-up time has come go back on the open list. */

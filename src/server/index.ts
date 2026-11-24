@@ -21,7 +21,7 @@ if (production) {
 
 mkdirSync(dirname(dbPath), { recursive: true });
 
-const { app, watcher } = createApp({
+const { app, planner, watcher } = createApp({
   dbPath,
   auth: {
     password: env.APP_PASSWORD,
@@ -39,6 +39,8 @@ const { app, watcher } = createApp({
   webhook: env.WEBHOOK_URL ? { url: env.WEBHOOK_URL, secret: env.WEBHOOK_SECRET } : undefined,
 });
 watcher?.start();
+// Look for replies from people you're waiting on, if Gmail is connected.
+setInterval(() => void planner.checkRepliesIfStale().catch(() => {}), 10 * 60 * 1000).unref();
 
 const onListening = () => {
   console.log(`Planner running at ${publicUrl} (listening on ${host ?? 'all interfaces'}:${port})`);
