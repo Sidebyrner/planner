@@ -42,16 +42,33 @@ final class Router {
         /// The routines you step through, as opposed to the board, which is a tool.
         static var guided: [Flow] { [.planDay, .wrapUp, .followUps, .weekly] }
 
-        /// The routine that fits the moment: planning in the morning, wrapping up in the evening
-        /// (or once blocks pile up), the weekly review at the weekend, follow-ups otherwise.
-        static func suggested(now: Date, review: Int, chase: Int) -> Flow {
+        /// Up to two routines that fit the moment, best first, leaving out any already done:
+        /// planning in the morning, chasing people or planning in the afternoon (wrapping up
+        /// once blocks pile up), wrapping up in the evening with the weekly review at the weekend.
+        static func forNow(now: Date, review: Int, chase: Int, unbooked: Int = 0) -> [Flow] {
             let hour = Calendar.current.component(.hour, from: now)
             let weekday = Calendar.current.component(.weekday, from: now) // 1 = Sunday
-            if hour < 12 { return .planDay }
-            if hour >= 18 || review > 2 { return .wrapUp }
-            if weekday == 6 || weekday == 1 { return .weekly }
-            if chase > 0 { return .followUps }
-            return .planDay
+            var picks: [Flow]
+            switch hour {
+            case ..<12:
+                picks = [.planDay] + (chase > 0 ? [.followUps] : [])
+            case ..<17:
+                picks = []
+                if chase > 0 { picks.append(.followUps) }
+                if unbooked > 0 || chase == 0 { picks.append(.planDay) }
+                if review >= 3 { picks.insert(.wrapUp, at: 0) }
+            default:
+                picks = [.wrapUp] + ([6, 7, 1].contains(weekday) ? [.weekly] : [])
+                if chase > 0 && picks.count < 2 { picks.append(.followUps) }
+            }
+            return Array(picks.filter { !$0.isDone(now: now) }.prefix(2))
+        }
+
+        /// The one routine that fits the moment, even if it's been done.
+        static func suggested(now: Date, review: Int, chase: Int, unbooked: Int = 0) -> Flow {
+            if let first = forNow(now: now, review: review, chase: chase, unbooked: unbooked).first { return first }
+            let hour = Calendar.current.component(.hour, from: now)
+            return hour < 12 ? .planDay : hour < 17 ? .followUps : .wrapUp
         }
 
         private var doneKey: String { "routine.\(rawValue).lastDone" }
@@ -103,6 +120,7 @@ final class Router {
         case flow(Flow)
         case board(projectId: String?)
         case settings
+        case nudge(taskId: String, channel: Nudge.Channel? = nil)
 
         var id: String {
             switch self {
@@ -114,6 +132,7 @@ final class Router {
             case .flow(let f): "flow-\(f.rawValue)"
             case .board(let id): "board-\(id ?? "all")"
             case .settings: "settings"
+            case let .nudge(id, channel): "nudge-\(id)-\(channel?.rawValue ?? "")"
             }
         }
     }
@@ -165,6 +184,8 @@ struct RouterSheets: ViewModifier {
                 #if os(macOS)
                     .frame(minWidth: 1000, minHeight: 640)
                 #endif
+            case let .nudge(taskId, channel):
+                NudgeSheet(taskId: taskId, channel: channel)
             case .settings:
                 NavigationStack {
                     SettingsView()
@@ -183,47 +204,53 @@ extension View {
 
 // MARK: - The floating + button (iPhone)
 
-/// Tap for Task, Event, Block time or Voice; press and hold to start talking straight away.
+/// Two ink buttons, bottom right: the mic speaks a task or event straight away; the + opens Task,
+/// Event, Block time and Speak (press and hold it to speak too).
 struct FloatingAddButton: View {
     @Environment(Router.self) private var router
     /// Set by the long press so the tap that ends it doesn't also open the tray.
     @State private var heldForVoice = false
 
     var body: some View {
-        Button {
-            if heldForVoice {
-                heldForVoice = false
-                return
+        VStack(spacing: 12) {
+            Button { router.open(.voice) } label: {
+                Image(systemName: "mic.fill")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(Color.onInk)
+                    .frame(width: 48, height: 48)
+                    .background(Color.ink, in: Circle())
+                    .shadow(color: .black.opacity(0.22), radius: 8, y: 3)
             }
-            router.open(.addTray)
-        } label: {
-            Image(systemName: "plus")
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 60, height: 60)
-                .background(Color.accentColor.gradient, in: Circle())
-                .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
-        }
-        .buttonStyle(PressScale())
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 0.4).onEnded { _ in
-                heldForVoice = true
-                router.open(.voice)
-            }
-        )
-        .sensoryFeedback(.impact(weight: .medium), trigger: router.sheet?.id)
-        .accessibilityLabel("Add")
-        .accessibilityHint("Opens Task, Event, Block time and Voice. Touch and hold to speak.")
-        .accessibilityAction(named: "Speak") { router.open(.voice) }
-    }
-}
+            .buttonStyle(.pressable(scale: 0.88))
+            .accessibilityLabel("Speak")
+            .accessibilityHint("Add a task or event by voice")
 
-/// Shrinks a little while pressed.
-private struct PressScale: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed ? 0.92 : 1)
-            .animation(.spring(duration: 0.2), value: configuration.isPressed)
+            Button {
+                if heldForVoice {
+                    heldForVoice = false
+                    return
+                }
+                router.open(.addTray)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.onInk)
+                    .frame(width: 60, height: 60)
+                    .background(Color.ink, in: Circle())
+                    .shadow(color: .black.opacity(0.28), radius: 10, y: 4)
+            }
+            .buttonStyle(.pressable(scale: 0.9))
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.4).onEnded { _ in
+                    heldForVoice = true
+                    router.open(.voice)
+                }
+            )
+            .accessibilityLabel("Add")
+            .accessibilityHint("Opens Task, Event, Block time and Speak. Touch and hold to speak.")
+            .accessibilityAction(named: "Speak") { router.open(.voice) }
+        }
+        .sensoryFeedback(.impact(weight: .medium), trigger: router.sheet?.id)
     }
 }
 

@@ -60,7 +60,10 @@ struct TodayView: View {
         VStack(alignment: .leading, spacing: 16) {
             header(now: now, chores: chores.count + other.count, people: people.count)
 
-            RoutineStrip(now: now, review: review.count, chase: people.reduce(0) { $0 + $1.due.count })
+            RoutineStrip(
+                now: now, review: review.count, chase: people.reduce(0) { $0 + $1.due.count },
+                unbooked: model.openTasks.filter { model.nextBlock(for: $0) == nil }.count
+            )
 
             NowCard { openEvent = $0 }
 
@@ -180,68 +183,87 @@ private extension Int {
     func nonZero(_ text: (Int) -> String) -> String? { self > 0 ? text(self) : nil }
 }
 
-/// The routines, with the one that fits the time of day first and highlighted.
+/// One or two routines that fit the time of day, the first featured, and a way to all of them.
 private struct RoutineStrip: View {
     @Environment(Router.self) private var router
     let now: Date
     let review: Int
     let chase: Int
-
-    private var suggested: Router.Flow { .suggested(now: now, review: review, chase: chase) }
+    let unbooked: Int
 
     var body: some View {
-        let order = [suggested] + Router.Flow.allCases.filter { $0 != suggested }
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                ForEach(order) { flow in
-                    let featured = flow == suggested
-                    Button { router.open(.flow(flow)) } label: {
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack {
-                                Image(systemName: flow.symbol).font(.headline)
-                                Spacer(minLength: 0)
-                                if let badge = badge(flow) {
-                                    Text("\(badge)").font(.caption2.weight(.bold)).padding(.horizontal, 6).padding(.vertical, 2)
-                                        .background(featured ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.15), in: Capsule())
-                                }
-                            }
-                            Text(flow.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                            Text(flow.blurb).font(.caption2).lineLimit(2).opacity(0.8)
-                        }
-                        .foregroundStyle(featured ? Color.white : Color.primary)
-                        .padding(12)
-                        .frame(width: 150, height: 104, alignment: .topLeading)
-                        .background(featured ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(Color.cardBackground),
-                                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityHint(flow.blurb)
-                }
+        let flows = Router.Flow.forNow(now: now, review: review, chase: chase, unbooked: unbooked)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(flows.isEmpty ? "Routines done for now" : "For right now")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
                 Button { router.go(.routines) } label: {
-                    VStack(spacing: 6) {
-                        Image(systemName: "square.grid.2x2").font(.headline)
-                        Text("All routines").font(.caption.weight(.semibold))
+                    HStack(spacing: 3) {
+                        Text("All routines")
+                        Image(systemName: "chevron.right").font(.caption2.weight(.bold))
                     }
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 96, height: 104)
-                    .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+            }
+            if !flows.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(Array(flows.enumerated()), id: \.element) { i, flow in
+                        card(flow, featured: i == 0, wide: flows.count == 1)
+                    }
+                }
             }
         }
-        .scrollClipDisabled()
+    }
+
+    private func card(_ flow: Router.Flow, featured: Bool, wide: Bool) -> some View {
+        Button { router.open(.flow(flow)) } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: flow.symbol).font(.title3.weight(.semibold))
+                    Spacer(minLength: 0)
+                    if let badge = badge(flow) {
+                        Text("\(badge)")
+                            .font(.caption.weight(.bold))
+                            .contentTransition(.numericText())
+                            .padding(.horizontal, 7).padding(.vertical, 2)
+                            .background(featured ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.18), in: Capsule())
+                    }
+                }
+                Spacer(minLength: 0)
+                Text(flow.title).font(.headline).lineLimit(1).minimumScaleFactor(0.85)
+                Text(flow.blurb).font(.caption).lineLimit(2).opacity(0.85)
+            }
+            .foregroundStyle(featured ? Color.white : Color.primary)
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: wide ? 96 : 120, alignment: .topLeading)
+            .background {
+                if featured {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(Color.accentColor.gradient)
+                        .shadow(color: Color.accentColor.opacity(0.35), radius: 12, y: 5)
+                } else {
+                    Color.clear.cardSurface()
+                }
+            }
+        }
+        .buttonStyle(.pressable)
+        .accessibilityHint(flow.blurb)
     }
 
     private func badge(_ flow: Router.Flow) -> Int? {
         switch flow {
         case .wrapUp: review > 0 ? review : nil
         case .followUps: chase > 0 ? chase : nil
+        case .planDay: unbooked > 0 ? unbooked : nil
         default: nil
         }
     }
 }
 
-/// Move, push or remove one of Planner's own blocks (long-press menu).
 private struct EventActions: View {
     @Environment(AppModel.self) private var model
     let event: CalEvent

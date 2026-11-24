@@ -39,6 +39,8 @@ struct StepFlow<Content: View>: View {
     var onNext: (Int) async -> Bool
     let content: Content
     @State private var working = false
+    @State private var celebrating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         title: String, flow: Router.Flow? = nil, steps: [String], step: Binding<Int>, nextLabel: String = "Next",
@@ -104,6 +106,8 @@ struct StepFlow<Content: View>: View {
                             guard go else { return }
                             if step == steps.count - 1 {
                                 flow?.markDone()
+                                withAnimation(reduceMotion ? nil : .spring(duration: 0.45, bounce: 0.4)) { celebrating = true }
+                                try? await Task.sleep(for: .milliseconds(reduceMotion ? 500 : 1100))
                                 dismiss()
                             } else { withAnimation { step += 1 } }
                         }
@@ -127,7 +131,36 @@ struct StepFlow<Content: View>: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
             }
+            .overlay {
+                if celebrating { Celebration(title: "\(title) done") }
+            }
+            .sensoryFeedback(.success, trigger: celebrating)
         }
+    }
+}
+
+/// A short "done" moment when a routine finishes.
+struct Celebration: View {
+    let title: String
+    @State private var pop = false
+
+    var body: some View {
+        ZStack {
+            Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+            VStack(spacing: 14) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 72, weight: .bold))
+                    .foregroundStyle(.white, Color.green.gradient)
+                    .scaleEffect(pop ? 1 : 0.3)
+                    .rotationEffect(.degrees(pop ? 0 : -30))
+                Text(title).font(.title2.weight(.bold))
+                    .opacity(pop ? 1 : 0)
+                    .offset(y: pop ? 0 : 12)
+            }
+        }
+        .transition(.opacity)
+        .onAppear { withAnimation(.spring(duration: 0.5, bounce: 0.5)) { pop = true } }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -390,7 +423,7 @@ struct WrapUpFlow: View {
     @ViewBuilder private var looseEnds: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Anything still on your mind? Get it out of your head and into Planner.").foregroundStyle(.secondary)
-            Card { CaptureBar() }
+            Card { StandaloneCaptureBar() }
             HStack {
                 Button { router.open(.voice) } label: { Label("Speak it", systemImage: "mic.fill").frame(maxWidth: .infinity) }
                 Button { router.open(.newTask) } label: { Label("New task", systemImage: "checklist").frame(maxWidth: .infinity) }
@@ -431,6 +464,7 @@ struct WrapUpFlow: View {
 struct FollowUpRoundFlow: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var nudging: String?
     @State private var queue: [String] = []
     @State private var index = 0
     @State private var handled = 0
@@ -474,6 +508,16 @@ struct FollowUpRoundFlow: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
+            .sheet(item: Binding(get: { nudging.map(IdentifiedString.init) }, set: { nudging = $0?.id })) { item in
+                NudgeSheet(taskId: item.id) {
+                    // Sent: count it and move to the next person once the sheet closes.
+                    handled += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                        nudging = nil
+                        withAnimation(.planner) { index += 1 }
+                    }
+                }
+            }
             .onAppear {
                 guard !started else { return }
                 started = true
@@ -509,10 +553,17 @@ struct FollowUpRoundFlow: View {
                     Link(destination: url) { Label(link.label, systemImage: TaskLinkIcon.name(for: url)) }
                 }
             }
-            if contact?.email != nil || contact?.phone != nil {
-                ContactButtons(name: task.waitingOn ?? "", email: contact?.email ?? "", phone: contact?.phone ?? "", subject: task.title)
-            } else {
-                Text("No email or phone saved for \(task.waitingOn ?? "them"). Add one on the task.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Draft").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(Nudge.text(for: task)).font(.callout).italic()
+                Button { nudging = task.id } label: {
+                    Label(contact?.phone != nil || contact?.email != nil ? "Edit & Send Nudge" : "Edit & Copy Nudge", systemImage: "paperplane.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+                .controlSize(.large)
             }
         }
     }
@@ -556,7 +607,7 @@ struct WeeklyReviewFlow: View {
         StepFlow(
             title: "Weekly Review",
             flow: .weekly,
-            steps: ["This week", "Overdue", "Waiting on", "Next week"],
+            steps: ["How the week went", "Overdue", "Waiting on", "Next week"],
             step: $step,
             nextLabel: step == 2 ? "Plan next week" : "Next",
             onNext: { i in
@@ -584,19 +635,11 @@ struct WeeklyReviewFlow: View {
     }
 
     @ViewBuilder private var week: some View {
-        let groups = model.finishedThisWeek()
-        let total = groups.reduce(0) { $0 + $1.tasks.count }
+        let insights = model.insights()
         VStack(alignment: .leading, spacing: 16) {
-            Text(total == 0 ? "Nothing ticked off yet this week." : "You finished \(total) task\(total == 1 ? "" : "s") since Monday.")
+            Text(insights.total == 0 ? "Nothing ticked off yet this week." : "You finished \(insights.total) task\(insights.total == 1 ? "" : "s") since Monday.")
                 .font(.title3.weight(.semibold))
-            ForEach(groups, id: \.project?.id) { group in
-                Card(title: group.project?.label ?? "No project", symbol: "folder", tint: group.project.tint, accessory: {
-                    Text("\(group.tasks.count)").font(.headline.monospacedDigit()).foregroundStyle(group.project.tint)
-                }) {
-                    ForEach(group.tasks.prefix(6)) { Label($0.title, systemImage: "checkmark").font(.callout) }
-                    if group.tasks.count > 6 { Text("and \(group.tasks.count - 6) more").font(.caption).foregroundStyle(.secondary) }
-                }
-            }
+            InsightsSummary(insights: insights)
         }
     }
 
@@ -819,3 +862,6 @@ private struct BoardCard: View {
         .accessibilityHint("Touch and hold to move it to another column")
     }
 }
+
+/// A string usable with `.sheet(item:)`.
+struct IdentifiedString: Identifiable { let id: String }

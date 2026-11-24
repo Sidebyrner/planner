@@ -4,10 +4,11 @@ import SwiftUI
 // MARK: - Card styling
 
 extension Color {
-    /// The page behind the cards.
+    /// The page behind the cards: a step darker than the system's grouped background in light
+    /// mode and true black in dark mode, so cards lift clearly off it.
     static var pageBackground: Color {
         #if os(iOS)
-        Color(uiColor: .systemGroupedBackground)
+        Color(light: Color(red: 0.91, green: 0.91, blue: 0.94), dark: .black)
         #else
         Color(nsColor: .windowBackgroundColor)
         #endif
@@ -16,10 +17,23 @@ extension Color {
     /// A card on that page.
     static var cardBackground: Color {
         #if os(iOS)
-        Color(uiColor: .secondarySystemGroupedBackground)
+        Color(light: .white, dark: Color(red: 0.11, green: 0.11, blue: 0.12))
         #else
         Color(nsColor: .controlBackgroundColor)
         #endif
+    }
+
+    /// The hairline around a card.
+    static var cardBorder: Color { Color.primary.opacity(0.08) }
+}
+
+extension View {
+    /// Card surface: fill, hairline border and a soft shadow so it reads as something to touch.
+    func cardSurface(cornerRadius: CGFloat = 20) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        return background(Color.cardBackground, in: shape)
+            .overlay(shape.strokeBorder(Color.cardBorder, lineWidth: 0.75))
+            .shadow(color: .black.opacity(0.07), radius: 10, y: 3)
     }
 }
 
@@ -49,7 +63,7 @@ struct Card<Content: View, Accessory: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .cardSurface()
     }
 }
 
@@ -323,41 +337,97 @@ struct WindowCard: View {
     }
 
     var body: some View {
+        let tasks = suggestions
         Card(title: title, symbol: window.kind.isFree ? "sparkles" : "briefcase", tint: window.kind.isFree ? .green : .orange) {
-            if suggestions.isEmpty {
+            if tasks.isEmpty {
                 Text(window.kind.isFree ? "Nothing open fits in this time." : "No open tasks for this stretch.")
                     .font(.callout).foregroundStyle(.secondary)
-            }
-            ForEach(suggestions) { task in
-                let minutes = min(model.remainingMinutes(task), window.minutes)
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(task.title).font(.body.weight(.medium)).lineLimit(1)
-                        Text([Format.duration(minutes), model.project(id: task.projectId)?.name, task.dueAt.map { "due \(Format.relative($0))" }]
-                            .compactMap { $0 }.joined(separator: " · "))
-                            .font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("Pick one to start now:").font(.subheadline).foregroundStyle(.secondary)
+                VStack(spacing: 0) {
+                    ForEach(tasks) { task in
+                        FitRow(task: task, minutes: min(model.remainingMinutes(task), window.minutes), start: startNow)
+                        if task.id != tasks.last?.id { Divider().padding(.leading, 4) }
                     }
-                    Spacer()
-                    Button("Start") { Task { await model.book(task, at: startNow, minutes: max(5, minutes)) } }
-                        .buttonStyle(.borderedProminent)
-                        .buttonBorderShape(.capsule)
-                        .controlSize(.small)
-                        .accessibilityHint("Books \(Format.duration(minutes)) for it starting now")
                 }
             }
-            HStack(spacing: 8) {
+            Divider()
+            HStack(spacing: 10) {
                 Button { router.open(.blockTime(start: startNow, minutes: min(60, window.minutes))) } label: {
-                    Label("Task here", systemImage: "clock.badge.checkmark")
+                    Label("Task here", systemImage: "clock.badge.checkmark").frame(maxWidth: .infinity)
                 }
                 Button { router.open(.newEvent(start: startNow, minutes: min(60, window.minutes))) } label: {
-                    Label("Event here", systemImage: "calendar.badge.plus")
+                    Label("Event here", systemImage: "calendar.badge.plus").frame(maxWidth: .infinity)
                 }
             }
             .buttonStyle(.bordered)
             .buttonBorderShape(.capsule)
-            .controlSize(.small)
-            .font(.caption.weight(.semibold))
+            .controlSize(.regular)
+            .font(.subheadline.weight(.semibold))
         }
+    }
+}
+
+/// A task that fits the free time: room for a two-line title and its details, and a big Start.
+private struct FitRow: View {
+    @Environment(AppModel.self) private var model
+    let task: PlannerTask
+    let minutes: Int
+    let start: Date
+    @State private var starting = false
+    @State private var started = false
+
+    var body: some View {
+        let project = model.project(id: task.projectId)
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(task.title)
+                    .font(.body.weight(.semibold))
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    if let project { ProjectChip(project: project) }
+                    if let due = task.dueAt {
+                        Label(Format.relative(due), systemImage: "flag")
+                            .foregroundStyle(due < Date() ? Color.red : Color.secondary)
+                    }
+                    if let progress = task.checklistProgress {
+                        Label(progress, systemImage: "checklist").foregroundStyle(.secondary)
+                    }
+                }
+                .font(.caption)
+                .labelStyle(.titleAndIcon)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 4)
+            Button {
+                starting = true
+                Task {
+                    started = await model.book(task, at: start, minutes: max(5, minutes))
+                    starting = false
+                }
+            } label: {
+                VStack(spacing: 1) {
+                    if starting {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: started ? "checkmark" : "play.fill").font(.subheadline.weight(.bold))
+                            .contentTransition(.symbolEffect(.replace))
+                        Text(started ? "Booked" : "Start").font(.subheadline.weight(.bold))
+                    }
+                    Text(Format.duration(minutes)).font(.caption2.weight(.semibold)).opacity(0.85)
+                }
+                .foregroundStyle(.white)
+                .frame(minWidth: 76, minHeight: 58)
+                .background((started ? Color.green : Color.accentColor).gradient, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.pressable(scale: 0.92))
+            .disabled(starting || started)
+            .sensoryFeedback(.success, trigger: started)
+            .accessibilityLabel("Start \(task.title)")
+            .accessibilityHint("Books \(Format.duration(minutes)) for it starting now")
+        }
+        .padding(.vertical, 12)
     }
 }
 
@@ -404,37 +474,41 @@ struct ChoreRow: View {
 
 // MARK: - Follow-ups
 
-/// Email, call or text someone from a small icon row.
+/// Message, email or call someone from a small icon row. Message and Email open a drafted
+/// nudge for `task`; sending it counts as chasing them.
 struct ContactIcons: View {
+    @Environment(Router.self) private var router
     let contact: Contact?
-    var subject: String = ""
+    var task: PlannerTask?
 
     var body: some View {
-        HStack(spacing: 6) {
-            if let email = contact?.email, let url = mailURL(email) {
-                Link(destination: url) { icon("envelope.fill") }.accessibilityLabel("Email \(contact?.name ?? "")")
+        HStack(spacing: 8) {
+            let phone = contact?.phone?.filter { $0.isNumber || $0 == "+" } ?? ""
+            if !phone.isEmpty {
+                if let task {
+                    Button { router.open(.nudge(taskId: task.id, channel: .message)) } label: { icon("message.fill", .green) }
+                        .buttonStyle(.pressable(scale: 0.88))
+                        .accessibilityLabel("Message \(contact?.name ?? "")")
+                }
+                if let url = URL(string: "tel:\(phone)") {
+                    Link(destination: url) { icon("phone.fill", .accentColor) }.accessibilityLabel("Call \(contact?.name ?? "")")
+                }
             }
-            if let phone = contact?.phone?.filter({ $0.isNumber || $0 == "+" }), !phone.isEmpty {
-                if let url = URL(string: "tel:\(phone)") { Link(destination: url) { icon("phone.fill") }.accessibilityLabel("Call \(contact?.name ?? "")") }
-                if let url = URL(string: "sms:\(phone)") { Link(destination: url) { icon("message.fill") }.accessibilityLabel("Message \(contact?.name ?? "")") }
+            if contact?.email?.isEmpty == false, let task {
+                Button { router.open(.nudge(taskId: task.id, channel: .email)) } label: { icon("envelope.fill", .accentColor) }
+                    .buttonStyle(.pressable(scale: 0.88))
+                    .accessibilityLabel("Email \(contact?.name ?? "")")
             }
         }
     }
 
-    private func mailURL(_ email: String) -> URL? {
-        var c = URLComponents()
-        c.scheme = "mailto"
-        c.path = email
-        if !subject.isEmpty { c.queryItems = [URLQueryItem(name: "subject", value: subject)] }
-        return c.url
-    }
-
-    private func icon(_ name: String) -> some View {
+    private func icon(_ name: String, _ tint: Color) -> some View {
         Image(systemName: name)
-            .font(.footnote)
-            .foregroundStyle(Color.accentColor)
-            .frame(width: 32, height: 32)
-            .background(Color.accentColor.opacity(0.12), in: Circle())
+            .font(.subheadline)
+            .foregroundStyle(tint)
+            .frame(width: 36, height: 36)
+            .background(tint.opacity(0.16), in: Circle())
+            .overlay(Circle().strokeBorder(tint.opacity(0.3), lineWidth: 0.75))
     }
 }
 
@@ -447,18 +521,13 @@ struct PersonCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text(String(person.name.prefix(1)).uppercased())
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Color.indigo.gradient, in: Circle())
-                    .accessibilityHidden(true)
+                Avatar(name: person.name)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(person.name).font(.body.weight(.semibold))
                     Text(summary).font(.caption).foregroundStyle(person.due.isEmpty ? Color.secondary : Color.red)
                 }
                 Spacer()
-                ContactIcons(contact: person.contact, subject: person.due.first?.title ?? "")
+                ContactIcons(contact: person.contact, task: person.due.first ?? person.pending.first)
             }
             ForEach(person.due) { task in
                 FollowUpRow(task: task, onOpen: { onOpen(task) })
@@ -476,6 +545,7 @@ struct PersonCard: View {
 
 struct FollowUpRow: View {
     @Environment(AppModel.self) private var model
+    @Environment(Router.self) private var router
     let task: PlannerTask
     var onOpen: () -> Void
 
@@ -493,6 +563,9 @@ struct FollowUpRow: View {
             }
             .buttonStyle(.plain)
             HStack(spacing: 8) {
+                Button { router.open(.nudge(taskId: task.id)) } label: { Label("Nudge", systemImage: "text.bubble") }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.indigo)
                 Menu {
                     Button("Check again tomorrow") { Task { await model.snooze(task, days: 1) } }
                     Button("Check again in 3 days") { Task { await model.snooze(task, days: 3) } }
@@ -503,7 +576,7 @@ struct FollowUpRow: View {
                 .menuStyle(.button)
                 .buttonStyle(.bordered)
                 Button { Task { await model.gotIt(task) } } label: { Label("Got it", systemImage: "checkmark") }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                     .tint(.green)
             }
             .buttonBorderShape(.capsule)

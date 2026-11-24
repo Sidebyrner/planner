@@ -23,6 +23,7 @@ struct PlannerApp: App {
                         await model.sync()
                     }
                 }
+                .onAppear { NotificationHandler.shared.attach(model: model, router: router) }
                 .onReceive(NotificationCenter.default.publisher(for: .EKEventStoreChanged)) { _ in
                     model.calendarChanged()
                 }

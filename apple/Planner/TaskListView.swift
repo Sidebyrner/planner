@@ -14,6 +14,8 @@ struct TaskListView: View {
     @State private var showDone = false
     @State private var filter: TaskFilter = .all
     @State private var openTask: PlannerTask?
+    /// What's typed in the bottom bar: it filters the list and becomes a task on return.
+    @State private var text = ""
 
     private func matches(_ task: PlannerTask) -> Bool {
         switch filter {
@@ -23,34 +25,48 @@ struct TaskListView: View {
         }
     }
 
+    /// The words to search for: what's typed, minus #project and @person tags.
+    private var searchWords: [String] {
+        text.lowercased().split(separator: " ").map(String.init).filter { !$0.hasPrefix("#") && !$0.hasPrefix("@") }
+    }
+
+    private func found(_ task: PlannerTask) -> Bool {
+        let words = searchWords
+        guard !words.isEmpty else { return true }
+        let haystack = (task.title + " " + task.notes + " " + (task.waitingOn ?? "")).lowercased()
+        return words.allSatisfy { haystack.contains($0) }
+    }
+
     var body: some View {
-        let open = model.openTasks.filter(matches)
-        let waiting = model.waitingTasks.filter(matches)
-        let done = model.doneTasks.filter(matches)
+        let open = model.openTasks.filter { matches($0) && found($0) }
+        let waiting = model.waitingTasks.filter { matches($0) && found($0) }
+        let done = model.doneTasks.filter { matches($0) && found($0) }
+        let searching = !searchWords.isEmpty
 
         List {
-            Section {
-                CaptureBar()
-            }
-
             if !model.liveProjects.isEmpty {
                 Section {
                     ProjectFilterBar(filter: $filter)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 14, bottom: 10, trailing: 14))
                 }
             }
 
-            Section("Open") {
+            Section {
                 if open.isEmpty {
-                    Text(model.state == nil ? "Loading…" : "Nothing open. Add a task above; #tag files it under a project.")
+                    Text(model.state == nil ? "Loading…" : searching ? "No open tasks match. Press return to add it." : "Nothing open. Add a task below; #tag files it under a project.")
                         .foregroundStyle(.secondary)
                 }
                 ForEach(open) { task in
                     TaskRow(task: task, nextBlock: model.nextBlock(for: task), showProject: filter == .all, onOpen: { openTask = task })
+                        .transition(.asymmetric(insertion: .opacity, removal: .move(edge: .trailing).combined(with: .opacity)))
                 }
                 .onDelete { offsets in
                     let tasks = offsets.map { open[$0] }
                     Task { for task in tasks { await model.delete(task) } }
                 }
+            } header: {
+                Text(searching ? "Open · \(open.count) match\(open.count == 1 ? "" : "es")" : "Open")
+                    .contentTransition(.numericText())
             }
 
             if !waiting.isEmpty {
@@ -62,7 +78,7 @@ struct TaskListView: View {
             }
 
             if !done.isEmpty {
-                Section(isExpanded: $showDone) {
+                Section(isExpanded: Binding(get: { showDone || searching }, set: { showDone = $0 })) {
                     ForEach(done.prefix(50)) { task in
                         TaskRow(task: task, nextBlock: nil, showProject: filter == .all, onOpen: { openTask = task })
                     }
@@ -71,8 +87,17 @@ struct TaskListView: View {
                 }
             }
         }
+        .animation(.planner, value: open.map(\.id))
+        .animation(.planner, value: filter)
         .navigationTitle("Tasks")
         .refreshable { await model.sync() }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            CaptureBar(text: $text)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(.bar)
+                .overlay(alignment: .top) { Divider() }
+        }
         .sheet(item: $openTask) { task in
             TaskDetailView(task: task)
         }
@@ -99,37 +124,91 @@ struct TaskListView: View {
     }
 }
 
+/// Project tags that wrap onto as many lines as they need, so none hide off to the side.
 struct ProjectFilterBar: View {
     @Environment(AppModel.self) private var model
     @Binding var filter: TaskFilter
+    @State private var expanded = false
+    private let collapsedCount = 7
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                pill("All", tint: .accentColor, on: filter == .all) { filter = .all }
-                ForEach(model.liveProjects) { project in
-                    let count = model.openTasks.filter { $0.projectId == project.id }.count
-                    pill(count > 0 ? "\(project.label) \(count)" : project.label, tint: project.color.color, on: filter == .project(project.id)) {
-                        filter = .project(project.id)
-                    }
+        let projects = model.liveProjects
+        let shown = expanded || projects.count <= collapsedCount + 1 ? projects : Array(projects.prefix(collapsedCount))
+        FlowLayout(spacing: 8) {
+            pill("All", tint: .accentColor, on: filter == .all) { filter = .all }
+            ForEach(shown) { project in
+                let count = model.openTasks.filter { $0.projectId == project.id }.count
+                pill(count > 0 ? "\(project.label) \(count)" : project.label, tint: project.color.color, on: filter == .project(project.id)) {
+                    filter = .project(project.id)
                 }
-                pill("No project", tint: .gray, on: filter == .none) { filter = .none }
             }
-            .padding(.vertical, 2)
+            pill("No project", tint: .gray, on: filter == .none) { filter = .none }
+            if projects.count > collapsedCount + 1 {
+                pill(expanded ? "Less" : "More (\(projects.count - collapsedCount))", tint: .secondary, on: false) {
+                    withAnimation(.planner) { expanded.toggle() }
+                }
+            }
         }
+        .sensoryFeedback(.selection, trigger: filter)
     }
 
     private func pill(_ title: String, tint: Color, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(.callout.weight(on ? .semibold : .regular))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .foregroundStyle(on ? tint : .primary)
-                .background(on ? tint.opacity(0.18) : Color.secondary.opacity(0.08), in: Capsule())
-                .overlay(Capsule().strokeBorder(on ? tint : .clear))
+                .font(.subheadline.weight(on ? .semibold : .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .foregroundStyle(on ? Color.white : Color.primary)
+                .background(on ? AnyShapeStyle(tint.gradient) : AnyShapeStyle(tint.opacity(0.14)), in: Capsule())
+                .overlay(Capsule().strokeBorder(on ? Color.clear : tint.opacity(0.35), lineWidth: 0.75))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable(scale: 0.94))
+        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// Lays children out left to right, wrapping to a new line when the row is full.
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let height = rows.map(\.height).reduce(0, +) + spacing * CGFloat(max(0, rows.count - 1))
+        let width = rows.map(\.width).max() ?? 0
+        return CGSize(width: proposal.width ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + spacing
+        }
+    }
+
+    private struct Row { var indices: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = [Row()]
+        for (i, subview) in subviews.enumerated() {
+            let size = subview.sizeThatFits(.unspecified)
+            let extra = rows[rows.count - 1].indices.isEmpty ? size.width : rows[rows.count - 1].width + spacing + size.width
+            if extra > width && !rows[rows.count - 1].indices.isEmpty {
+                rows.append(Row())
+            }
+            var row = rows[rows.count - 1]
+            row.width = row.indices.isEmpty ? size.width : row.width + spacing + size.width
+            row.height = max(row.height, size.height)
+            row.indices.append(i)
+            rows[rows.count - 1] = row
+        }
+        return rows
     }
 }
 
@@ -154,10 +233,16 @@ struct TaskRow: View {
                     Task { await model.toggleDone(task) }
                 } label: {
                     Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(task.isDone ? Color.accentColor : project.tint.opacity(0.8))
+                        .foregroundStyle(task.isDone ? Color.green : project.tint.opacity(0.85))
                         .imageScale(.large)
+                        .fontWeight(.semibold)
+                        .contentTransition(.symbolEffect(.replace))
+                        .symbolEffect(.bounce, value: task.isDone)
+                        .frame(minWidth: 30, minHeight: 30)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.pressable(scale: 0.8))
+                .sensoryFeedback(.success, trigger: task.isDone) { _, done in done }
                 .accessibilityLabel(task.isDone ? "Mark as not done" : "Mark as done")
             }
 
@@ -235,7 +320,9 @@ struct TaskRow: View {
 /// Type a task or event in plain language. The server shows how it reads it before saving.
 struct CaptureBar: View {
     @Environment(AppModel.self) private var model
-    @State private var text = ""
+    @Binding var text: String
+    /// On the Tasks page the field also filters the list.
+    var findsToo = true
     @State private var preview: Captured?
     @State private var saving = false
     @State private var showVoice = false
@@ -246,8 +333,12 @@ struct CaptureBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("Add a task… #project @person", text: $text)
+                if findsToo {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
+                }
+                TextField(findsToo ? "Find or add a task… #project @person" : "Add a task… #project @person", text: $text)
                     .textFieldStyle(.plain)
+                    .submitLabel(.done)
                     .focused($focused)
                     .onSubmit(save)
                     .disabled(saving)
@@ -270,9 +361,10 @@ struct CaptureBar: View {
                 }
             }
             if let preview, !trimmed.isEmpty {
-                Text(Format.captured(preview, projectName: model.project(id: preview.projectId)?.label))
+                Text((findsToo ? "Return to add: " : "") + Format.captured(preview, projectName: model.project(id: preview.projectId)?.label))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
         }
         .sheet(isPresented: $showVoice) { VoiceCaptureView() }
@@ -300,4 +392,10 @@ struct CaptureBar: View {
             focused = true
         }
     }
+}
+
+/// The add field on its own, keeping its own text (used in Wrap Up).
+struct StandaloneCaptureBar: View {
+    @State private var text = ""
+    var body: some View { CaptureBar(text: $text, findsToo: false) }
 }

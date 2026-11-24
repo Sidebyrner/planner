@@ -16,14 +16,14 @@ struct ProjectsHomeView: View {
                         NavigationLink(value: item.project.id) {
                             ProjectCard(project: item.project, summary: item.summary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                     let unfiled = model.summary(for: nil)
                     if unfiled.open + unfiled.waiting.count > 0 {
                         NavigationLink(value: ProjectsHomeView.unfiledID) {
                             ProjectCard(project: nil, summary: unfiled)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.pressable)
                     }
                 }
             }
@@ -77,6 +77,7 @@ private struct ProjectCard: View {
                 Text(project?.label ?? "No project").font(.headline).lineLimit(1)
                 Spacer(minLength: 4)
                 Text(summary.open == 0 ? "Clear" : "\(summary.open) open")
+                    .contentTransition(.numericText())
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
@@ -112,7 +113,7 @@ private struct ProjectCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .cardSurface()
         .contentShape(RoundedRectangle(cornerRadius: 20))
         .accessibilityElement(children: .combine)
         .accessibilityHint("Opens the project")
@@ -139,7 +140,8 @@ private struct ProjectCard: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .foregroundStyle(chip.color)
-                    .background(chip.color.opacity(0.12), in: Capsule())
+                    .background(chip.color.opacity(0.18), in: Capsule())
+                    .overlay(Capsule().strokeBorder(chip.color.opacity(0.35), lineWidth: 0.75))
             }
         }
         .labelStyle(.titleAndIcon)

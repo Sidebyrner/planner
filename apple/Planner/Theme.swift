@@ -24,6 +24,46 @@ extension Optional where Wrapped == Project {
     var tint: Color { self?.color.color ?? .accentColor }
 }
 
+extension Color {
+    /// A colour that differs in light and dark mode.
+    init(light: Color, dark: Color) {
+        #if os(iOS)
+        self.init(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(dark) : UIColor(light) })
+        #else
+        self.init(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .vibrantDark]) != nil ? NSColor(dark) : NSColor(light) })
+        #endif
+    }
+
+    /// The floating add and voice buttons and the Today tab marker: near-black in light mode,
+    /// near-white in dark. Kept apart from the blue accent and the project colours.
+    static let ink = Color(light: Color(red: 0.11, green: 0.11, blue: 0.13), dark: Color(red: 0.95, green: 0.95, blue: 0.97))
+    /// Glyphs on ink.
+    static let onInk = Color(light: .white, dark: Color(red: 0.08, green: 0.08, blue: 0.1))
+}
+
+extension Animation {
+    /// The one spring used for list and card changes, so the app moves consistently.
+    static let planner = Animation.snappy(duration: 0.32, extraBounce: 0.08)
+}
+
+/// Shrinks a little while pressed, for cards and big buttons.
+struct PressableStyle: ButtonStyle {
+    var scale: CGFloat = 0.96
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed && !reduceMotion ? scale : 1)
+            .opacity(configuration.isPressed ? 0.92 : 1)
+            .animation(.spring(duration: 0.22), value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == PressableStyle {
+    static var pressable: PressableStyle { PressableStyle() }
+    static func pressable(scale: CGFloat) -> PressableStyle { PressableStyle(scale: scale) }
+}
+
 /// Seven equal circles, Monday first. ISO weekdays (1 = Monday) in and out.
 struct WeekdayPicker: View {
     @Binding var days: [Int]

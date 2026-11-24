@@ -4,6 +4,9 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(Router.self) private var router
+    #if os(iOS)
+    @State private var keyboardUp = false
+    #endif
 
     var body: some View {
         @Bindable var model = model
@@ -37,42 +40,34 @@ struct ContentView: View {
         }
         #else
         @Bindable var router = router
+        // The system tab bar can't make one tab stand out, so the tabs keep their state in a
+        // TabView with its bar hidden and our own bar sits along the bottom.
         TabView(selection: $router.place) {
-            NavigationStack {
-                TodayView().syncBanner()
+            tab(.routines) { RoutinesView() }
+            tab(.calendar) { CalendarView() }
+            tab(.today) { TodayView() }
+            tab(.tasks) { TaskListView() }
+            tab(.projects) { ProjectsHomeView() }
+        }
+        .overlay(alignment: .bottom) {
+            if !keyboardUp {
+                PlannerTabBar()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
-            .tabItem { Label("Today", systemImage: Router.Place.today.symbol) }
-            .tag(Router.Place.today)
-
-            NavigationStack {
-                TaskListView().syncBanner()
-            }
-            .tabItem { Label("Tasks", systemImage: Router.Place.tasks.symbol) }
-            .tag(Router.Place.tasks)
-
-            NavigationStack {
-                ProjectsHomeView().syncBanner()
-            }
-            .tabItem { Label("Projects", systemImage: Router.Place.projects.symbol) }
-            .tag(Router.Place.projects)
-
-            NavigationStack {
-                CalendarView().syncBanner()
-            }
-            .tabItem { Label("Calendar", systemImage: Router.Place.calendar.symbol) }
-            .tag(Router.Place.calendar)
-
-            NavigationStack {
-                RoutinesView().syncBanner()
-            }
-            .tabItem { Label("Routines", systemImage: Router.Place.routines.symbol) }
-            .tag(Router.Place.routines)
         }
         .overlay(alignment: .bottomTrailing) {
-            FloatingAddButton()
-                .padding(.trailing, 20)
-                .padding(.bottom, 96)
+            // Tasks has its own add field and mic along the bottom.
+            if !keyboardUp && router.place != .tasks {
+                FloatingAddButton()
+                    .padding(.trailing, 18)
+                    .padding(.bottom, Self.tabBarRoom + 18)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
         }
+        .animation(.planner, value: keyboardUp)
+        .animation(.planner, value: router.place)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
         .onAppear {
             // Settings left the tab bar; `-PlannerTab settings` still opens it.
             if UserDefaults.standard.string(forKey: "PlannerTab") == "settings" { router.open(.settings) }
@@ -80,6 +75,105 @@ struct ContentView: View {
         #endif
     }
 }
+
+#if os(iOS)
+extension ContentView {
+    /// Room the bottom bar takes, kept clear inside each tab so lists and bottom fields sit above it.
+    static let tabBarRoom: CGFloat = 66
+
+    private func tab<V: View>(_ place: Router.Place, @ViewBuilder content: () -> V) -> some View {
+        NavigationStack {
+            content()
+                .syncBanner()
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: keyboardUp ? 0 : Self.tabBarRoom)
+                }
+        }
+        .toolbar(.hidden, for: .tabBar)
+        .tag(place)
+    }
+}
+
+/// The bottom bar: Routines · Calendar · Today · Tasks · Projects, with Today raised in the
+/// middle as the app's home.
+struct PlannerTabBar: View {
+    @Environment(Router.self) private var router
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 0) {
+            item(.routines)
+            item(.calendar)
+            today
+            item(.tasks)
+            item(.projects)
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+        .background {
+            Capsule(style: .continuous)
+                .fill(.regularMaterial)
+                .overlay(Capsule(style: .continuous).strokeBorder(Color.cardBorder, lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
+                .padding(.top, 2)
+        }
+        .padding(.horizontal, 14)
+        .padding(.bottom, 2)
+        .sensoryFeedback(.selection, trigger: router.place)
+    }
+
+    private func select(_ place: Router.Place) {
+        withAnimation(reduceMotion ? nil : .planner) { router.go(place) }
+    }
+
+    private func item(_ place: Router.Place) -> some View {
+        let on = router.place == place
+        return Button { select(place) } label: {
+            VStack(spacing: 3) {
+                Image(systemName: place.symbol)
+                    .font(.system(size: 19, weight: on ? .semibold : .regular))
+                    .symbolVariant(on ? .fill : .none)
+                    .frame(height: 24)
+                Text(place.title).font(.caption2.weight(on ? .semibold : .medium))
+            }
+            .foregroundStyle(on ? Color.accentColor : Color.secondary)
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable(scale: 0.9))
+        .accessibilityLabel(place.title)
+        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// Today: a raised ink disc that fills the middle slot.
+    private var today: some View {
+        let on = router.place == .today
+        return Button { select(.today) } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "sun.max.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(Color.onInk)
+                    .symbolEffect(.bounce, value: on)
+                    .frame(width: 56, height: 56)
+                    .background(Color.ink, in: Circle())
+                    .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: on ? 2.5 : 0).padding(-4))
+                    .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                    .scaleEffect(on ? 1.04 : 1)
+                Text("Today")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(on ? Color.accentColor : Color.primary)
+            }
+            .offset(y: -10)
+            .padding(.bottom, -10)
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.pressable(scale: 0.9))
+        .accessibilityLabel("Today")
+        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+    }
+}
+#endif
 
 #if os(macOS)
 /// The Mac sidebar: Today, the task list, projects or routines, with the calendar beside it.
@@ -102,7 +196,7 @@ struct SidebarView: View {
             case .projects:
                 // Its own stack, so a project opens in the sidebar with the calendar still beside it.
                 NavigationStack { ProjectsHomeView() }
-            case .routines: RoutinesView()
+            case .routines: NavigationStack { RoutinesView() }
             }
         }
     }

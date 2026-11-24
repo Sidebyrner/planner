@@ -27,8 +27,16 @@ struct RoutinesView: View {
     private func content(now: Date) -> some View {
         let review = model.blocksToReview(now: now).count
         let chase = model.people.filter { !$0.due.isEmpty }.count
-        let suggested = Router.Flow.suggested(now: now, review: review, chase: chase)
+        let unbooked = model.openTasks.filter { model.nextBlock(for: $0) == nil }.count
+        let suggested = Router.Flow.suggested(now: now, review: review, chase: chase, unbooked: unbooked)
         return VStack(alignment: .leading, spacing: 20) {
+            let streak = model.streak(now: now)
+            if streak > 1 {
+                Label("\(streak)-day streak", systemImage: "flame.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .contentTransition(.numericText())
+            }
             SuggestedRoutine(flow: suggested, status: status(suggested, now: now), done: suggested.isDone(now: now)) {
                 router.open(.flow(suggested))
             }
@@ -44,15 +52,20 @@ struct RoutinesView: View {
                         if flow != flows.last { Divider().padding(.leading, 60) }
                     }
                 }
-                .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .cardSurface()
             }
 
             VStack(alignment: .leading, spacing: 8) {
                 sectionTitle("Tools")
-                RoutineRow(flow: .board, status: "\(model.openTasks.count) open · \(model.waitingTasks.count) waiting", done: false) {
-                    router.open(.flow(.board))
+                VStack(spacing: 0) {
+                    RoutineRow(flow: .board, status: "\(model.openTasks.count) open · \(model.waitingTasks.count) waiting", done: false) {
+                        router.open(.flow(.board))
+                    }
+                    Divider().padding(.leading, 60)
+                    NavigationLink { InsightsView() } label: { insightsRow }
+                        .buttonStyle(.plain)
                 }
-                .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .cardSurface()
             }
 
             #if os(macOS)
@@ -61,6 +74,26 @@ struct RoutinesView: View {
                 .foregroundStyle(.secondary)
             #endif
         }
+    }
+
+    private var insightsRow: some View {
+        let insights = model.insights()
+        return HStack(spacing: 14) {
+            Image(systemName: "chart.bar.xaxis")
+                .font(.title3)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 32, height: 32)
+                .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Insights").font(.body.weight(.semibold))
+                Text("\(insights.total) done this week" + (insights.streak > 0 ? " · \(insights.streak)-day streak" : "")).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
     }
 
     private func sectionTitle(_ text: String) -> some View {
@@ -125,9 +158,10 @@ private struct SuggestedRoutine: View {
             .padding(18)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.accentColor.gradient, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .shadow(color: Color.accentColor.opacity(0.35), radius: 14, y: 6)
             .contentShape(RoundedRectangle(cornerRadius: 22))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.pressable)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Suggested: \(flow.title). \(status)")
         .accessibilityHint("Starts the routine")
@@ -148,7 +182,7 @@ private struct RoutineRow: View {
                     .font(.title3)
                     .foregroundStyle(Color.accentColor)
                     .frame(width: 32, height: 32)
-                    .background(Color.accentColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         Text(flow.title).font(.body.weight(.semibold))
