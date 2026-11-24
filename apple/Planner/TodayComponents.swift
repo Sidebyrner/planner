@@ -1,0 +1,562 @@
+import PlannerKit
+import SwiftUI
+
+// MARK: - Card styling
+
+extension Color {
+    /// The page behind the cards.
+    static var pageBackground: Color {
+        #if os(iOS)
+        Color(uiColor: .systemGroupedBackground)
+        #else
+        Color(nsColor: .windowBackgroundColor)
+        #endif
+    }
+
+    /// A card on that page.
+    static var cardBackground: Color {
+        #if os(iOS)
+        Color(uiColor: .secondarySystemGroupedBackground)
+        #else
+        Color(nsColor: .controlBackgroundColor)
+        #endif
+    }
+}
+
+/// A titled card, the building block of Today and the workflows.
+struct Card<Content: View, Accessory: View>: View {
+    var title: String?
+    var symbol: String?
+    var tint: Color = .accentColor
+    @ViewBuilder var accessory: () -> Accessory
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let title {
+                HStack(spacing: 8) {
+                    if let symbol {
+                        Image(systemName: symbol).foregroundStyle(tint).font(.subheadline.weight(.semibold))
+                    }
+                    Text(title).font(.headline)
+                    Spacer(minLength: 0)
+                    accessory()
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isHeader)
+            }
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+}
+
+extension Card where Accessory == EmptyView {
+    init(title: String? = nil, symbol: String? = nil, tint: Color = .accentColor, @ViewBuilder content: @escaping () -> Content) {
+        self.init(title: title, symbol: symbol, tint: tint, accessory: { EmptyView() }, content: content)
+    }
+}
+
+// MARK: - Day strip
+
+/// Today as one bar: events, your blocks, free stretches you can tap to fill, and now.
+struct DayStrip: View {
+    @Environment(AppModel.self) private var model
+    var day: Date = Date()
+    var onGap: (AppModel.Gap) -> Void = { _ in }
+    var onEvent: (CalEvent) -> Void = { _ in }
+
+    private var calendar: Calendar { .current }
+
+    private var range: (start: Date, end: Date) {
+        let base = calendar.startOfDay(for: day)
+        let earliest = events.map { calendar.component(.hour, from: $0.startAt) }.min() ?? 7
+        let latest = events.map { calendar.component(.hour, from: $0.endAt) + 1 }.max() ?? 22
+        let startHour = max(5, min(7, earliest))
+        let endHour = min(24, max(22, latest))
+        return (calendar.date(bySettingHour: startHour, minute: 0, second: 0, of: base) ?? base,
+                calendar.date(byAdding: .hour, value: endHour, to: base) ?? base)
+    }
+
+    private var events: [CalEvent] {
+        model.todayEvents.filter { !$0.ignored && calendar.isDate($0.startAt, inSameDayAs: day) }
+    }
+
+    private var gaps: [AppModel.Gap] {
+        calendar.isDateInToday(day) ? model.todayGaps(minMinutes: 15) : []
+    }
+
+    var body: some View {
+        let (start, end) = range
+        let total = end.timeIntervalSince(start)
+        VStack(alignment: .leading, spacing: 6) {
+            GeometryReader { geo in
+                let width = geo.size.width
+                let x = { (d: Date) -> CGFloat in CGFloat(max(0, min(1, d.timeIntervalSince(start) / total))) * width }
+                ZStack(alignment: .topLeading) {
+                    RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.1))
+
+                    ForEach(gaps) { gap in
+                        Button { onGap(gap) } label: {
+                            RoundedRectangle(cornerRadius: 8)
+                                .strokeBorder(Color.green, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                                .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                                .overlay {
+                                    if x(gap.end) - x(gap.start) > 34 {
+                                        Image(systemName: "plus").font(.caption.weight(.bold)).foregroundStyle(.green)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: max(6, x(gap.end) - x(gap.start) - 2), height: 40)
+                        .offset(x: x(gap.start) + 1)
+                        .accessibilityLabel("Free \(Format.duration(gap.minutes)) from \(Format.time(gap.start))")
+                        .accessibilityHint("Adds something here")
+                    }
+
+                    ForEach(events) { event in
+                        let w = max(4, x(event.endAt) - x(event.startAt))
+                        let tint = event.isTaskBlock || model.projectFor(event) != nil ? model.projectFor(event).tint : Color.gray
+                        Button { onEvent(event) } label: {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(tint.opacity(event.isTaskBlock ? 0.85 : 0.45))
+                                .overlay(alignment: .leading) {
+                                    if w > 54 {
+                                        Text(event.title)
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.white)
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 5)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                        .frame(width: w, height: 40)
+                        .offset(x: x(event.startAt))
+                        .accessibilityLabel("\(event.title), \(Format.time(event.startAt)) to \(Format.time(event.endAt))")
+                    }
+
+                    if calendar.isDateInToday(day), Date() > start, Date() < end {
+                        Capsule().fill(Color.red).frame(width: 2.5, height: 48).offset(x: x(Date()) - 1, y: -4)
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+            .frame(height: 40)
+
+            GeometryReader { geo in
+                let firstHour = calendar.component(.hour, from: start)
+                let lastHour = calendar.component(.hour, from: end.addingTimeInterval(-1)) + 1
+                ForEach(Array(stride(from: firstHour + (3 - firstHour % 3) % 3, through: lastHour, by: 3)), id: \.self) { hour in
+                    let at = calendar.date(bySettingHour: min(hour, 23), minute: 0, second: 0, of: day) ?? day
+                    Text(hour == 12 ? "noon" : Format.shortClock(at))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
+                        .position(x: CGFloat(at.timeIntervalSince(start) / total) * geo.size.width, y: 6)
+                }
+            }
+            .frame(height: 12)
+            .accessibilityHidden(true)
+        }
+    }
+}
+
+// MARK: - Now
+
+/// The block you're in, the step to do next, and one-tap Done / +15 / Skip.
+struct NowCard: View {
+    @Environment(AppModel.self) private var model
+    var onOpen: (CalEvent) -> Void
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            let now = context.date
+            let current = model.todayEvents.last { !$0.ignored && $0.startAt <= now && $0.endAt > now && $0.isTaskBlock }
+            let other = model.todayEvents.last { !$0.ignored && $0.startAt <= now && $0.endAt > now && !$0.isTaskBlock }
+            let next = model.todayEvents.first { !$0.ignored && $0.startAt > now }
+            VStack(alignment: .leading, spacing: 10) {
+                if let block = current {
+                    blockCard(block, now: now)
+                } else if let other {
+                    plainNow(other, now: now)
+                }
+                if let next {
+                    Button { onOpen(next) } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "arrow.turn.down.right").foregroundStyle(.secondary)
+                            Text("Then ").foregroundStyle(.secondary) + Text(next.title).fontWeight(.semibold)
+                            Spacer(minLength: 4)
+                            Text(untilText(next.startAt, now: now)).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                        .font(.callout)
+                        .lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, current == nil && other == nil ? 0 : 4)
+                } else if current == nil && other == nil {
+                    Text("Nothing else on the calendar today.").foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func untilText(_ start: Date, now: Date) -> String {
+        let minutes = Int(start.timeIntervalSince(now) / 60)
+        return minutes < 180 ? "in \(Format.duration(max(1, minutes)))" : Format.time(start)
+    }
+
+    @ViewBuilder
+    private func blockCard(_ block: CalEvent, now: Date) -> some View {
+        let project = model.projectFor(block)
+        let left = max(0, Int(block.endAt.timeIntervalSince(now) / 60))
+        let progress = min(1, max(0, now.timeIntervalSince(block.startAt) / block.endAt.timeIntervalSince(block.startAt)))
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("NOW").font(.caption.weight(.heavy)).foregroundStyle(project.tint)
+                Text("\(Format.duration(left)) left · until \(Format.time(block.endAt))")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                Spacer()
+                if let project { ProjectChip(project: project) }
+            }
+            Button { onOpen(block) } label: {
+                Text(block.title).font(.title2.weight(.bold)).multilineTextAlignment(.leading).foregroundStyle(.primary)
+            }
+            .buttonStyle(.plain)
+            ProgressView(value: progress).tint(project.tint)
+
+            if let step = model.nextStep(in: block) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("STEP \(step.number) OF \(step.of)").font(.caption2.weight(.bold)).foregroundStyle(.secondary)
+                    Text(step.item.text).font(.title3.weight(.semibold))
+                    Button {
+                        Task { await model.toggleStep(step.item, of: step.task) }
+                    } label: {
+                        Label("Done, next step", systemImage: "checkmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(project.tint)
+                    .controlSize(.large)
+                }
+                .padding(12)
+                .background(project.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 14))
+            }
+
+            HStack(spacing: 8) {
+                Button { Task { await model.mark(block, .done) } } label: {
+                    Label("Done", systemImage: "checkmark.circle.fill").frame(maxWidth: .infinity)
+                }
+                .tint(.green)
+                Button { Task { await model.extend(block, minutes: 15) } } label: {
+                    Label("+15 min", systemImage: "plus.circle").frame(maxWidth: .infinity)
+                }
+                .tint(.orange)
+                Button { Task { await model.mark(block, .missed) } } label: {
+                    Label("Skip", systemImage: "forward.end").frame(maxWidth: .infinity)
+                }
+                .tint(.secondary)
+            }
+            .buttonStyle(.bordered)
+            .labelStyle(.titleAndIcon)
+            .font(.subheadline.weight(.semibold))
+        }
+        .padding(16)
+        .background(
+            LinearGradient(colors: [project.tint.opacity(0.18), project.tint.opacity(0.06)], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+    }
+
+    private func plainNow(_ event: CalEvent, now: Date) -> some View {
+        let project = model.projectFor(event) ?? model.hostProject(for: event)
+        return Button { onOpen(event) } label: {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 2).fill(project.tint).frame(width: 4, height: 38)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("NOW").font(.caption.weight(.heavy)).foregroundStyle(project.tint)
+                    Text(event.title).font(.title3.weight(.semibold)).foregroundStyle(.primary)
+                }
+                Spacer()
+                Text("until \(Format.time(event.endAt))").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+// MARK: - The window you're in
+
+/// Free time you're in right now (or a project's own time, like your shift), with what fits.
+struct WindowCard: View {
+    @Environment(AppModel.self) private var model
+    @Environment(Router.self) private var router
+    let window: AppModel.Window
+
+    private var title: String {
+        switch window.kind {
+        case .free:
+            if let until = window.until { return "Free now · \(Format.duration(window.minutes)) until \(until.title)" }
+            return "Free for the rest of the day"
+        case .hosted(let project):
+            return "During \(window.until?.title ?? project.name) · \(Format.duration(window.minutes)) left"
+        }
+    }
+
+    private var suggestions: [PlannerTask] {
+        switch window.kind {
+        case .free:
+            return model.fits(minutes: window.minutes)
+        case .hosted(let project):
+            // That project's work first, then anything quick.
+            let own = model.fits(minutes: window.minutes, projectId: project.id, limit: 3)
+            let quick = model.fits(minutes: 15, limit: 3).filter { q in !own.contains { $0.id == q.id } }
+            return Array((own + quick).prefix(4))
+        }
+    }
+
+    private var startNow: Date {
+        let snap = 5 * 60.0
+        return Date(timeIntervalSinceReferenceDate: (Date().timeIntervalSinceReferenceDate / snap).rounded(.up) * snap)
+    }
+
+    var body: some View {
+        Card(title: title, symbol: window.kind.isFree ? "sparkles" : "briefcase", tint: window.kind.isFree ? .green : .orange) {
+            if suggestions.isEmpty {
+                Text(window.kind.isFree ? "Nothing open fits in this time." : "No open tasks for this stretch.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+            ForEach(suggestions) { task in
+                let minutes = min(model.remainingMinutes(task), window.minutes)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(task.title).font(.body.weight(.medium)).lineLimit(1)
+                        Text([Format.duration(minutes), model.project(id: task.projectId)?.name, task.dueAt.map { "due \(Format.relative($0))" }]
+                            .compactMap { $0 }.joined(separator: " · "))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Start") { Task { await model.book(task, at: startNow, minutes: max(5, minutes)) } }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.small)
+                        .accessibilityHint("Books \(Format.duration(minutes)) for it starting now")
+                }
+            }
+            HStack(spacing: 8) {
+                Button { router.open(.blockTime(start: startNow, minutes: min(60, window.minutes))) } label: {
+                    Label("Task here", systemImage: "clock.badge.checkmark")
+                }
+                Button { router.open(.newEvent(start: startNow, minutes: min(60, window.minutes))) } label: {
+                    Label("Event here", systemImage: "calendar.badge.plus")
+                }
+            }
+            .buttonStyle(.bordered)
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
+            .font(.caption.weight(.semibold))
+        }
+    }
+}
+
+extension AppModel.Window.Kind {
+    var isFree: Bool { if case .free = self { true } else { false } }
+}
+
+// MARK: - Chores and bills
+
+struct ChoreRow: View {
+    @Environment(AppModel.self) private var model
+    let task: PlannerTask
+    var onOpen: () -> Void
+
+    var body: some View {
+        let overdue = (task.dueAt ?? .distantFuture) < Date()
+        HStack(spacing: 12) {
+            Button { Task { await model.toggleDone(task) } } label: {
+                Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
+                    .font(.title2)
+                    .foregroundStyle(task.isDone ? Color.green : model.project(id: task.projectId).tint)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Mark \(task.title) done")
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
+                        Text(task.title).foregroundStyle(.primary)
+                        if task.repeats { Image(systemName: "repeat").font(.caption2).foregroundStyle(.secondary) }
+                    }
+                    Text([task.dueAt.map { overdue ? "overdue · \(Format.relative($0))" : Format.relative($0) }, task.recurrence?.summary]
+                        .compactMap { $0 }.joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(overdue ? .red : .secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+}
+
+// MARK: - Follow-ups
+
+/// Email, call or text someone from a small icon row.
+struct ContactIcons: View {
+    let contact: Contact?
+    var subject: String = ""
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if let email = contact?.email, let url = mailURL(email) {
+                Link(destination: url) { icon("envelope.fill") }.accessibilityLabel("Email \(contact?.name ?? "")")
+            }
+            if let phone = contact?.phone?.filter({ $0.isNumber || $0 == "+" }), !phone.isEmpty {
+                if let url = URL(string: "tel:\(phone)") { Link(destination: url) { icon("phone.fill") }.accessibilityLabel("Call \(contact?.name ?? "")") }
+                if let url = URL(string: "sms:\(phone)") { Link(destination: url) { icon("message.fill") }.accessibilityLabel("Message \(contact?.name ?? "")") }
+            }
+        }
+    }
+
+    private func mailURL(_ email: String) -> URL? {
+        var c = URLComponents()
+        c.scheme = "mailto"
+        c.path = email
+        if !subject.isEmpty { c.queryItems = [URLQueryItem(name: "subject", value: subject)] }
+        return c.url
+    }
+
+    private func icon(_ name: String) -> some View {
+        Image(systemName: name)
+            .font(.footnote)
+            .foregroundStyle(Color.accentColor)
+            .frame(width: 32, height: 32)
+            .background(Color.accentColor.opacity(0.12), in: Circle())
+    }
+}
+
+/// One person you're waiting on: what's due to chase, with Snooze and Got it.
+struct PersonCard: View {
+    @Environment(AppModel.self) private var model
+    let person: AppModel.Person
+    var onOpen: (PlannerTask) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Text(String(person.name.prefix(1)).uppercased())
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .frame(width: 34, height: 34)
+                    .background(Color.indigo.gradient, in: Circle())
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(person.name).font(.body.weight(.semibold))
+                    Text(summary).font(.caption).foregroundStyle(person.due.isEmpty ? Color.secondary : Color.red)
+                }
+                Spacer()
+                ContactIcons(contact: person.contact, subject: person.due.first?.title ?? "")
+            }
+            ForEach(person.due) { task in
+                FollowUpRow(task: task, onOpen: { onOpen(task) })
+            }
+        }
+    }
+
+    private var summary: String {
+        var parts: [String] = []
+        if !person.due.isEmpty { parts.append("\(person.due.count) to chase") }
+        if !person.pending.isEmpty { parts.append("\(person.pending.count) waiting") }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct FollowUpRow: View {
+    @Environment(AppModel.self) private var model
+    let task: PlannerTask
+    var onOpen: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(task.title).font(.subheadline.weight(.medium)).foregroundStyle(.primary).lineLimit(2)
+                    if let since = task.followUpAt {
+                        Text("follow-up was \(Format.relative(since))").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            HStack(spacing: 8) {
+                Menu {
+                    Button("Check again tomorrow") { Task { await model.snooze(task, days: 1) } }
+                    Button("Check again in 3 days") { Task { await model.snooze(task, days: 3) } }
+                    Button("Check again next week") { Task { await model.snooze(task, days: 7) } }
+                } label: {
+                    Label("Snooze", systemImage: "clock.arrow.circlepath")
+                }
+                .menuStyle(.button)
+                .buttonStyle(.bordered)
+                Button { Task { await model.gotIt(task) } } label: { Label("Got it", systemImage: "checkmark") }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+            }
+            .buttonBorderShape(.capsule)
+            .controlSize(.small)
+            .labelStyle(.titleAndIcon)
+            .font(.caption.weight(.semibold))
+        }
+        .padding(.leading, 44)
+    }
+}
+
+// MARK: - Checking off blocks
+
+/// A finished block: did it happen? Done takes its time off the task; Missed finds new time.
+struct BlockReviewRow: View {
+    @Environment(AppModel.self) private var model
+    let block: CalEvent
+    @State private var working = false
+
+    var body: some View {
+        let project = model.projectFor(block)
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 2).fill(project.tint).frame(width: 4, height: 34)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(block.title).font(.body.weight(.medium)).lineLimit(1)
+                Text("\(Format.relative(block.startAt))–\(Format.time(block.endAt))").font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            if let outcome = block.outcome {
+                Label(outcome == .done ? "Done" : "Missed", systemImage: outcome == .done ? "checkmark.circle.fill" : "arrow.uturn.backward.circle")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(outcome == .done ? .green : .orange)
+            } else if working {
+                ProgressView()
+            } else {
+                Button { mark(.missed) } label: { Text("Missed") }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                Button { mark(.done) } label: { Text("Done") }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+            }
+        }
+        .buttonBorderShape(.capsule)
+        .controlSize(.small)
+        .font(.caption.weight(.semibold))
+    }
+
+    private func mark(_ outcome: BlockOutcome) {
+        working = true
+        Task {
+            await model.mark(block, outcome)
+            working = false
+        }
+    }
+}

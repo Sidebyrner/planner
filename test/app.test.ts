@@ -113,6 +113,25 @@ describe('web API', () => {
     expect(bad.status).toBe(400);
   });
 
+  it('proposes for chosen tasks only and marks a block over the API', async () => {
+    await start();
+    const a = (await api('POST', '/api/tasks', { title: 'Top one', estimateMin: 60 })).body;
+    await api('POST', '/api/tasks', { title: 'Not today', estimateMin: 60 });
+    const only = (await api('POST', '/api/schedule/propose', { taskIds: [a.id] })).body;
+    expect(only.blocks.map((b: any) => b.taskId)).toEqual([a.id]);
+    const all = (await api('POST', '/api/schedule/propose')).body;
+    expect(all.blocks).toHaveLength(2);
+
+    const start2 = Date.now() - 2 * 3600_000;
+    const [block] = (await api('POST', '/api/schedule/apply', {
+      blocks: [{ taskId: a.id, startAt: new Date(start2).toISOString(), endAt: new Date(start2 + 3600_000).toISOString() }],
+    })).body;
+    const marked = await api('POST', `/api/events/${block.id}/outcome`, { outcome: 'done' });
+    expect(marked.status).toBe(200);
+    expect(marked.body.tasks[0].status).toBe('done');
+    expect((await api('POST', `/api/events/${block.id}/outcome`, { outcome: 'later' })).status).toBe(400);
+  });
+
   it('rejects bad input with a readable message', async () => {
     const r = await api('POST', '/api/events', { title: 'Backwards', startAt: inDays(1, 15), endAt: inDays(1, 14) });
     expect(r.status).toBe(400);

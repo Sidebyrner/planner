@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Router.self) private var router
     /// Opening tab. A launch argument like `-PlannerTab calendar` lands in UserDefaults, which
     /// is how screenshots and Siri ("What's next") open a specific screen.
     @State private var tab = UserDefaults.standard.string(forKey: "PlannerTab") ?? "today"
@@ -18,7 +19,10 @@ struct ContentView: View {
                 main
             }
         }
-        .alert("Planner", isPresented: Binding(get: { model.actionError != nil }, set: { if !$0 { model.actionError = nil } })) {
+        .routerSheets()
+        // Held back while a routine or add sheet is open: presenting it would close that sheet.
+        // Routines show their errors inline instead.
+        .alert("Planner", isPresented: Binding(get: { model.actionError != nil && router.sheet == nil }, set: { if !$0 { model.actionError = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(model.actionError ?? "")
@@ -60,6 +64,15 @@ struct ContentView: View {
             .tabItem { Label("Settings", systemImage: "gear") }
             .tag("settings")
         }
+        .overlay(alignment: .bottomTrailing) {
+            if tab != "settings" {
+                FloatingAddButton()
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 96)
+                    .transition(.scale.combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.3), value: tab)
         #endif
     }
 }
@@ -159,4 +172,5 @@ extension View {
 #Preview {
     ContentView()
         .environment(AppModel(calendarStore: InMemoryCalendarStore()))
+        .environment(Router())
 }

@@ -4,6 +4,7 @@ import SwiftUI
 /// Week grid on the Mac, one day at a time on the iPhone. Proposed blocks are dashed;
 /// everything Planner owns is coloured by project. On the Mac, drag a Planner block to move it.
 struct CalendarView: View {
+    @Environment(Router.self) private var router
     @Environment(AppModel.self) private var model
     @State private var anchor = Date()
     @State private var selectedProposal: ProposedBlock?
@@ -78,6 +79,9 @@ struct CalendarView: View {
                 .disabled(planning)
                 .keyboardShortcut("p")
                 .help("Propose time blocks for open tasks")
+                #if os(iOS)
+                Button { router.open(.newEvent()) } label: { Label("New Event", systemImage: "calendar.badge.plus") }
+                #endif
             }
         }
         .confirmationDialog(

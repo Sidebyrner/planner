@@ -24,7 +24,8 @@ struct QuickAddView: View {
     @State private var saving = false
 
     /// Open prefilled for a gap ("Add…" on a free row), or blank from the + button.
-    init(start: Date? = nil, minutes: Int = 30) {
+    init(kind: Kind = .task, start: Date? = nil, minutes: Int = 30) {
+        _kind = State(initialValue: kind)
         _minutes = State(initialValue: minutes)
         _startChoice = State(initialValue: start == nil ? .nextFree : .custom)
         _customStart = State(initialValue: start ?? Date())
@@ -36,7 +37,12 @@ struct QuickAddView: View {
         case .now:
             return Date(timeIntervalSinceReferenceDate: (now.timeIntervalSinceReferenceDate / 300).rounded(.up) * 300)
         case .nextFree:
-            return model.todayGaps(minMinutes: minutes).first?.start ?? now
+            // The first gap that fits; else the next free moment at all, so it never lands on top of
+            // the block you're in.
+            return model.todayGaps(minMinutes: minutes).first?.start
+                ?? model.todayGaps(minMinutes: 5).first?.start
+                ?? model.currentEvent?.endAt
+                ?? now
         case .afterCurrent:
             return model.currentEvent?.endAt ?? now
         case .custom:
@@ -111,7 +117,7 @@ struct QuickAddView: View {
                 }
             }
             .formStyle(.grouped)
-            .navigationTitle("Add to Today")
+            .navigationTitle(kind == .event ? "New Event" : "Block Time")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif

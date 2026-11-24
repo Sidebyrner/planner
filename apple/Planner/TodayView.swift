@@ -1,184 +1,30 @@
 import PlannerKit
 import SwiftUI
 
-/// What matters right now: the current and next block, the rest of today with its free gaps
-/// (fill one with a tap), a plan for the rest of the day, follow-ups and what's due.
+/// Today, built around how the day actually runs: the block you're in and its next step, the
+/// whole day at a glance with free time to fill, what fits the window you're in (your shift
+/// included), chores and bills to tick off, and who you're waiting on.
 struct TodayView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Router.self) private var router
     @State private var openTask: PlannerTask?
     @State private var openEvent: CalEvent?
-    @State private var quickAdd: QuickAddRequest?
-    @State private var showVoice = false
-    @State private var showEarlier = false
+    @State private var showLater = false
     @State private var planning = false
 
-    struct QuickAddRequest: Identifiable {
-        let id = UUID()
-        var start: Date?
-        var minutes = 30
-    }
-
-    /// The rest of today in order: events, free gaps and proposed blocks.
-    private enum Row: Identifiable {
-        case event(CalEvent)
-        case gap(AppModel.Gap)
-        case proposed(ProposedBlock)
-
-        var id: String {
-            switch self {
-            case .event(let e): "e:\(e.id)"
-            case .gap(let g): "g:\(g.start.timeIntervalSince1970)"
-            case .proposed(let p): "p:\(p.id)"
-            }
-        }
-
-        var start: Date {
-            switch self {
-            case .event(let e): e.startAt
-            case .gap(let g): g.start
-            case .proposed(let p): p.startAt
-            }
-        }
-    }
-
-    private func rows(now: Date) -> [Row] {
-        let events = model.todayEvents.filter { $0.endAt > now }.map(Row.event)
-        let proposed = model.todayProposal.map(Row.proposed)
-        // Hide gaps the proposal already fills, so the list doesn't say "free" under a dashed block.
-        let gaps = model.todayGaps(now: now).filter { gap in
-            !model.todayProposal.contains { $0.startAt < gap.end && $0.endAt > gap.start && $0.endAt.timeIntervalSince($0.startAt) >= gap.end.timeIntervalSince(gap.start) - 60 }
-        }.map(Row.gap)
-        return (events + proposed + gaps).sorted { $0.start < $1.start }
-    }
-
     var body: some View {
-        let now = Date()
-        let earlier = model.todayEvents.filter { $0.endAt <= now }
-        List {
-            Section {
-                CaptureBar()
-            } header: {
-                Text(now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
-                    .textCase(nil)
+        ScrollView {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                content(now: context.date)
             }
-
-            Section {
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    VStack(spacing: 10) {
-                        if let current = model.currentEvent {
-                            NowCard(label: "Now", event: current, project: model.projectFor(current), at: context.date)
-                                .onTapGesture { openEvent = current }
-                        }
-                        if let next = model.nextEvent {
-                            NowCard(label: "Next", event: next, project: model.projectFor(next), at: context.date)
-                                .onTapGesture { openEvent = next }
-                        }
-                        if model.currentEvent == nil && model.nextEvent == nil {
-                            Text("Nothing else on the calendar.")
-                                .foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-
-            if !model.followUpsDue.isEmpty {
-                Section("Follow up") {
-                    ForEach(model.followUpsDue) { task in
-                        Button { openTask = task } label: {
-                            Label {
-                                VStack(alignment: .leading) {
-                                    Text(task.title)
-                                    Text("with \(task.waitingOn ?? "them")").font(.caption).foregroundStyle(.secondary)
-                                }
-                            } icon: {
-                                Image(systemName: "arrow.uturn.left.circle").foregroundStyle(.red)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            Section {
-                let items = rows(now: now)
-                if items.isEmpty {
-                    Text(earlier.isEmpty ? "A clear day." : "Nothing else today.").foregroundStyle(.secondary)
-                }
-                ForEach(items) { row in
-                    switch row {
-                    case .event(let event):
-                        TimelineRow(event: event, project: model.projectFor(event), tasks: model.tasks(for: event))
-                            .contentShape(Rectangle())
-                            .onTapGesture { openEvent = event }
-                            .modifier(EventSwipes(event: event))
-                    case .gap(let gap):
-                        GapRow(gap: gap, suggestions: model.suggestions(for: gap)) { task in
-                            Task { await model.book(task, at: gap.start, minutes: min(model.remainingMinutes(task), gap.minutes)) }
-                        } onAdd: {
-                            quickAdd = QuickAddRequest(start: gap.start, minutes: min(60, gap.minutes))
-                        }
-                    case .proposed(let block):
-                        ProposedRow(block: block, project: model.project(id: block.projectId), tasks: (block.taskIds ?? [block.taskId]).compactMap { model.task(id: $0) }) {
-                            Task { await model.bookToday([block]) }
-                        } onSkip: {
-                            model.skipToday(block)
-                        }
-                    }
-                }
-                if !earlier.isEmpty {
-                    DisclosureGroup("Earlier today (\(earlier.count))", isExpanded: $showEarlier) {
-                        ForEach(earlier) { event in
-                            TimelineRow(event: event, project: model.projectFor(event), tasks: model.tasks(for: event))
-                                .contentShape(Rectangle())
-                                .onTapGesture { openEvent = event }
-                        }
-                    }
-                    .foregroundStyle(.secondary)
-                }
-            } header: {
-                HStack {
-                    Text("Rest of today")
-                    Spacer()
-                    if model.todayProposal.count > 1 {
-                        Button("Book all \(model.todayProposal.count)") { Task { await model.bookToday(model.todayProposal) } }
-                            .font(.caption.weight(.semibold))
-                            .textCase(nil)
-                    }
-                }
-            }
-
-            if !model.dueToday.isEmpty {
-                Section("Due today or overdue") {
-                    ForEach(model.dueToday) { task in
-                        TaskRow(task: task, nextBlock: model.nextBlock(for: task), onOpen: { openTask = task })
-                    }
-                }
-            }
-
-            if !model.waitingTasks.isEmpty {
-                Section("Waiting on others") {
-                    ForEach(model.waitingTasks) { task in
-                        Button { openTask = task } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(task.title)
-                                Text([task.waitingOn.map { "Waiting on \($0)" }, task.followUpAt.map { "follow up \(Format.relative($0))" }].compactMap { $0 }.joined(separator: " · "))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 96) // room above the floating + button
         }
+        .background(Color.pageBackground)
         .navigationTitle("Today")
         .refreshable { await model.sync() }
         .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItem(placement: .navigation) {
                 Button {
                     planning = true
                     Task {
@@ -189,90 +35,219 @@ struct TodayView: View {
                     if planning { ProgressView() } else { Label("Plan the rest of today", systemImage: "wand.and.stars") }
                 }
                 .disabled(planning)
-                Button { showVoice = true } label: { Label("Speak", systemImage: "mic") }
-                Button { quickAdd = QuickAddRequest() } label: { Label("Add", systemImage: "plus") }
+                .help("Propose blocks for open tasks in today's free time")
             }
+            AddToolbar(showFlows: true)
         }
         .sheet(item: $openTask) { TaskDetailView(task: $0) }
         .sheet(item: $openEvent) { EventDetailView(event: $0) }
-        .sheet(item: $quickAdd) { QuickAddView(start: $0.start, minutes: $0.minutes) }
-        .sheet(isPresented: $showVoice) { VoiceCaptureView() }
+    }
+
+    @ViewBuilder
+    private func content(now: Date) -> some View {
+        let review = model.blocksToReview()
+        let chores = model.choresDue
+        let other = model.otherDueToday
+        let people = model.people.filter { !$0.due.isEmpty }
+        let waitingCount = model.people.reduce(0) { $0 + $1.pending.count }
+        let later = model.todayEvents.filter { $0.startAt > now }
+
+        VStack(alignment: .leading, spacing: 16) {
+            header(now: now, chores: chores.count + other.count, people: people.count)
+
+            RoutineStrip(now: now, review: review.count, chase: people.reduce(0) { $0 + $1.due.count })
+
+            NowCard { openEvent = $0 }
+
+            Card(title: "Your day", symbol: "calendar.day.timeline.left") {
+                DayStrip(
+                    onGap: { gap in router.open(.blockTime(start: gap.start, minutes: min(60, gap.minutes))) },
+                    onEvent: { openEvent = $0 }
+                )
+                Text("Tap a green stretch to fill it.").font(.caption).foregroundStyle(.secondary)
+            }
+
+            if let window = model.currentWindow(now: now) {
+                WindowCard(window: window)
+            }
+
+            if !model.todayProposal.isEmpty {
+                Card(title: "Proposed for today", symbol: "wand.and.stars", accessory: {
+                    if model.todayProposal.count > 1 {
+                        Button("Book all") { Task { await model.bookToday(model.todayProposal) } }
+                            .font(.caption.weight(.semibold))
+                    }
+                }) {
+                    ForEach(model.todayProposal) { block in
+                        ProposedRow(block: block, project: model.project(id: block.projectId), tasks: (block.taskIds ?? [block.taskId]).compactMap { model.task(id: $0) }) {
+                            Task { await model.bookToday([block]) }
+                        } onSkip: {
+                            model.skipToday(block)
+                        }
+                    }
+                }
+            }
+
+            if !review.isEmpty {
+                Card(title: "Did these happen?", symbol: "checkmark.circle", tint: .green) {
+                    ForEach(review.prefix(4)) { BlockReviewRow(block: $0) }
+                    if review.count > 4 {
+                        Button("Check off all \(review.count)") { router.open(.flow(.wrapUp)) }.font(.callout)
+                    }
+                }
+            }
+
+            if !chores.isEmpty || !other.isEmpty {
+                Card(title: chores.isEmpty ? "Due today" : "Chores & bills", symbol: "checklist.checked", tint: .teal) {
+                    ForEach(chores) { task in ChoreRow(task: task) { openTask = task } }
+                    if !chores.isEmpty && !other.isEmpty { Divider() }
+                    ForEach(other) { task in ChoreRow(task: task) { openTask = task } }
+                }
+            }
+
+            if !people.isEmpty || waitingCount > 0 {
+                Card(title: "Follow-ups", symbol: "person.2", tint: .indigo, accessory: {
+                    if !people.isEmpty {
+                        Button("Start round") { router.open(.flow(.followUps)) }.font(.caption.weight(.semibold))
+                    }
+                }) {
+                    if people.isEmpty {
+                        Text("Waiting on \(waitingCount) thing\(waitingCount == 1 ? "" : "s"); nothing to chase yet.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+                    ForEach(people) { person in
+                        PersonCard(person: person) { openTask = $0 }
+                        if person.id != people.last?.id { Divider() }
+                    }
+                }
+            }
+
+            if !later.isEmpty {
+                Card {
+                    DisclosureGroup(isExpanded: $showLater) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            ForEach(later) { event in
+                                TimelineRow(event: event, project: model.projectFor(event), tasks: model.tasks(for: event))
+                                    .contentShape(Rectangle())
+                                    .onTapGesture { openEvent = event }
+                                    .contextMenu { EventActions(event: event) }
+                            }
+                        }
+                        .padding(.top, 8)
+                    } label: {
+                        Label("Later today (\(later.count))", systemImage: "list.bullet").font(.headline).foregroundStyle(.primary)
+                    }
+                }
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func header(now: Date, chores: Int, people: Int) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(now.formatted(.dateTime.weekday(.wide).month(.wide).day()))
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(greeting(now))
+                .font(.title2.weight(.bold))
+            let parts = [
+                model.todayEvents.filter { $0.endAt > now && !$0.ignored }.count.nonZero { "\($0) on the calendar" },
+                chores.nonZero { "\($0) due" },
+                people.nonZero { "\($0) to chase" },
+            ].compactMap { $0 }
+            if !parts.isEmpty {
+                Text(parts.joined(separator: " · ")).font(.callout).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func greeting(_ now: Date) -> String {
+        switch Calendar.current.component(.hour, from: now) {
+        case ..<12: "Good morning"
+        case ..<17: "Good afternoon"
+        default: "Good evening"
+        }
     }
 }
 
-/// Swipe actions for Planner's own items; mirrored calendar events stay read-only.
-private struct EventSwipes: ViewModifier {
+private extension Int {
+    func nonZero(_ text: (Int) -> String) -> String? { self > 0 ? text(self) : nil }
+}
+
+/// The routines, with the one that fits the time of day first and highlighted.
+private struct RoutineStrip: View {
+    @Environment(Router.self) private var router
+    let now: Date
+    let review: Int
+    let chase: Int
+
+    private var suggested: Router.Flow {
+        let hour = Calendar.current.component(.hour, from: now)
+        let weekday = Calendar.current.component(.weekday, from: now) // 1 = Sunday
+        if hour < 12 { return .planDay }
+        if hour >= 18 || review > 2 { return .wrapUp }
+        if weekday == 6 || weekday == 1 { return .weekly }
+        if chase > 0 { return .followUps }
+        return .planDay
+    }
+
+    var body: some View {
+        let order = [suggested] + Router.Flow.allCases.filter { $0 != suggested }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(order) { flow in
+                    let featured = flow == suggested
+                    Button { router.open(.flow(flow)) } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Image(systemName: flow.symbol).font(.headline)
+                                Spacer(minLength: 0)
+                                if let badge = badge(flow) {
+                                    Text("\(badge)").font(.caption2.weight(.bold)).padding(.horizontal, 6).padding(.vertical, 2)
+                                        .background(featured ? Color.white.opacity(0.25) : Color.accentColor.opacity(0.15), in: Capsule())
+                                }
+                            }
+                            Text(flow.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                            Text(flow.blurb).font(.caption2).lineLimit(2).opacity(0.8)
+                        }
+                        .foregroundStyle(featured ? Color.white : Color.primary)
+                        .padding(12)
+                        .frame(width: 150, height: 104, alignment: .topLeading)
+                        .background(featured ? AnyShapeStyle(Color.accentColor.gradient) : AnyShapeStyle(Color.cardBackground),
+                                    in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityHint(flow.blurb)
+                }
+            }
+        }
+        .scrollClipDisabled()
+    }
+
+    private func badge(_ flow: Router.Flow) -> Int? {
+        switch flow {
+        case .wrapUp: review > 0 ? review : nil
+        case .followUps: chase > 0 ? chase : nil
+        default: nil
+        }
+    }
+}
+
+/// Move, push or remove one of Planner's own blocks (long-press menu).
+private struct EventActions: View {
     @Environment(AppModel.self) private var model
     let event: CalEvent
 
-    func body(content: Content) -> some View {
-        if event.source == .local {
-            content
-                .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if event.isTaskBlock {
-                        Button { Task { await model.completeTasks(in: event) } } label: { Label("Done", systemImage: "checkmark") }
-                            .tint(.green)
-                    }
-                }
-                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                    Button(role: .destructive) { Task { await model.removeBlock(event) } } label: { Label("Remove", systemImage: "trash") }
-                    Button { Task { await model.moveToTomorrow(event) } } label: { Label("Tomorrow", systemImage: "arrow.right.to.line") }
-                        .tint(.indigo)
-                    Button { Task { await model.push(event, minutes: 15) } } label: { Label("+15m", systemImage: "clock.arrow.circlepath") }
-                        .tint(.orange)
-                }
-        } else {
-            content
-        }
-    }
-}
-
-private struct GapRow: View {
-    let gap: AppModel.Gap
-    let suggestions: [PlannerTask]
-    var onBook: (PlannerTask) -> Void
-    var onAdd: () -> Void
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(Format.time(gap.start))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 56, alignment: .trailing)
-                Image(systemName: "sparkles").foregroundStyle(.green).font(.caption)
-                Text("Free · \(Format.duration(gap.minutes)) until \(Format.time(gap.end))")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.green)
-                Spacer()
-                Button("Add…", action: onAdd)
-                    .font(.caption.weight(.semibold))
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.capsule)
-                    .controlSize(.small)
+        if event.source == .local {
+            if event.isTaskBlock {
+                Button { Task { await model.completeTasks(in: event) } } label: { Label("Done", systemImage: "checkmark") }
             }
-            if !suggestions.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        Text("Fits:").font(.caption).foregroundStyle(.secondary)
-                        ForEach(suggestions) { task in
-                            Button { onBook(task) } label: {
-                                Label("\(task.title) · \(Format.duration(task.estimateMin))", systemImage: "plus.circle")
-                                    .font(.caption)
-                                    .lineLimit(1)
-                            }
-                            .buttonStyle(.bordered)
-                            .buttonBorderShape(.capsule)
-                            .controlSize(.small)
-                            .accessibilityHint("Books it in this free time")
-                        }
-                    }
-                    .padding(.leading, 66)
-                }
-            }
+            Button { Task { await model.push(event, minutes: 15) } } label: { Label("Push 15 min", systemImage: "clock.arrow.circlepath") }
+            Button { Task { await model.moveToTomorrow(event) } } label: { Label("Move to Tomorrow", systemImage: "arrow.right.to.line") }
+            Button(role: .destructive) { Task { await model.removeBlock(event) } } label: { Label("Remove", systemImage: "trash") }
         }
-        .padding(.vertical, 4)
-        .listRowBackground(Color.green.opacity(0.05))
     }
 }
 
@@ -312,51 +287,6 @@ private struct ProposedRow: View {
         }
         .padding(.vertical, 2)
         .listRowBackground(project.tint.opacity(0.06))
-    }
-}
-
-private struct NowCard: View {
-    let label: String
-    let event: CalEvent
-    let project: Project?
-    let at: Date
-
-    private var detail: String {
-        if event.startAt <= at {
-            let left = max(0, Int(event.endAt.timeIntervalSince(at) / 60))
-            return "\(Format.duration(left)) left · until \(Format.time(event.endAt))"
-        }
-        let until = max(0, Int(event.startAt.timeIntervalSince(at) / 60))
-        let when = Calendar.current.isDateInToday(event.startAt) ? Format.time(event.startAt) : Format.relative(event.startAt)
-        return until < 120 ? "in \(Format.duration(until)) · \(when)" : when
-    }
-
-    private var progress: Double? {
-        guard event.startAt <= at else { return nil }
-        let total = event.endAt.timeIntervalSince(event.startAt)
-        return total > 0 ? min(1, at.timeIntervalSince(event.startAt) / total) : nil
-    }
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            RoundedRectangle(cornerRadius: 2)
-                .fill(project.tint)
-                .frame(width: 4)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(label.uppercased()).font(.caption2.weight(.bold)).foregroundStyle(.secondary)
-                Text(event.title).font(.title3.weight(.semibold)).lineLimit(2)
-                Text(detail).font(.callout).foregroundStyle(.secondary)
-                if let progress {
-                    ProgressView(value: progress).tint(project.tint)
-                }
-                if let project { ProjectChip(project: project) }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(project.tint.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
-        .contentShape(Rectangle())
     }
 }
 

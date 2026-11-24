@@ -97,8 +97,17 @@ public struct PlannerAPI: Sendable {
         return try await call("POST", "api/capture", body: Body(text: text))
     }
 
-    public func proposeSchedule() async throws -> ScheduleProposal {
-        try await call("POST", "api/schedule/propose")
+    /// Blocks for every open task, or only `taskIds` ("plan my top 3").
+    public func proposeSchedule(taskIds: [String]? = nil) async throws -> ScheduleProposal {
+        struct Body: Encodable { var taskIds: [String] }
+        if let taskIds { return try await call("POST", "api/schedule/propose", body: Body(taskIds: taskIds)) }
+        return try await call("POST", "api/schedule/propose")
+    }
+
+    /// Record how a task block went.
+    public func markBlock(id: String, _ outcome: BlockOutcome) async throws -> BlockMarkResult {
+        struct Body: Encodable { var outcome: BlockOutcome }
+        return try await call("POST", "api/events/\(id)/outcome", body: Body(outcome: outcome))
     }
 
     public func applySchedule(_ blocks: [BlockBooking]) async throws -> [CalEvent] {

@@ -184,13 +184,22 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
   r.post('/events', h((req) => planner.createEvent(EventCreate.parse(req.body))));
   r.patch('/events/:id', h((req) => planner.updateEvent(String(req.params.id), EventPatch.parse(req.body))));
   r.delete('/events/:id', h((req) => planner.deleteEvent(String(req.params.id))));
+  // How a task block went: done takes its time off the estimate, missed proposes new time.
+  r.post('/events/:id/outcome', h((req) => {
+    const { outcome } = z.object({ outcome: z.enum(['done', 'missed']) }).parse(req.body);
+    return planner.markBlock(String(req.params.id), outcome);
+  }));
 
   r.post('/capture', h((req) => {
     const { text, preview } = z.object({ text: z.string().trim().min(1).max(500), preview: z.boolean().optional() }).parse(req.body);
     return preview ? { parsed: planner.preview(text) } : planner.capture(text);
   }));
 
-  r.post('/schedule/propose', h(() => planner.propose()));
+  r.post('/schedule/propose', h((req) => {
+    // Optional: only these tasks ("plan my top 3").
+    const { taskIds } = z.object({ taskIds: z.array(z.string()).max(200).optional() }).parse(req.body ?? {});
+    return planner.propose({ taskIds });
+  }));
   r.post('/schedule/apply', h((req) => {
     const { blocks } = z.object({ blocks: z.array(Booking).min(1) }).parse(req.body);
     return planner.apply(blocks);

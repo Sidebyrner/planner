@@ -285,6 +285,10 @@ public struct CalEvent: Codable, Identifiable, Hashable, Sendable {
     public var projectId: String? = nil
     /// Tasks sharing a Quick block. Empty otherwise.
     public var taskIds: [String] = []
+    /// The scheduler leaves this event out (set with ignore_event).
+    public var ignored: Bool = false
+    /// For a finished task block: whether the work happened.
+    public var outcome: BlockOutcome? = nil
 
     /// A block reserved for one task, or a Quick block for several.
     public var isTaskBlock: Bool { taskId != nil || !taskIds.isEmpty }
@@ -296,7 +300,7 @@ public struct CalEvent: Codable, Identifiable, Hashable, Sendable {
 
 extension CalEvent {
     private enum CodingKeys: String, CodingKey {
-        case id, title, notes, startAt, endAt, allDay, taskId, googleId, externalId, source, projectId, taskIds
+        case id, title, notes, startAt, endAt, allDay, taskId, googleId, externalId, source, projectId, taskIds, ignored, outcome
     }
 
     public init(from decoder: Decoder) throws {
@@ -313,7 +317,21 @@ extension CalEvent {
         source = try c.decode(EventSource.self, forKey: .source)
         projectId = try c.decodeIfPresent(String.self, forKey: .projectId)
         taskIds = try c.decodeIfPresent([String].self, forKey: .taskIds) ?? []
+        ignored = try c.decodeIfPresent(Bool.self, forKey: .ignored) ?? false
+        outcome = try? c.decodeIfPresent(BlockOutcome.self, forKey: .outcome)
     }
+}
+
+public enum BlockOutcome: String, Codable, Sendable {
+    case done, missed
+}
+
+/// What marking a block returned: the block, its tasks as they are now, and new time
+/// proposed for missed work.
+public struct BlockMarkResult: Decodable, Sendable {
+    public var block: CalEvent
+    public var tasks: [PlannerTask]
+    public var replan: ScheduleProposal?
 }
 
 public struct Settings: Codable, Hashable, Sendable {

@@ -83,7 +83,7 @@ final class AppModel {
 
     let calendarStore: CalendarStore
     private let cache: PlannerCache
-    private var engine: SyncEngine?
+    private(set) var engine: SyncEngine?
     private var started = false
 
     init(calendarStore: CalendarStore? = nil, cache: PlannerCache? = nil) {
@@ -195,7 +195,7 @@ final class AppModel {
 
     /// Runs `work` against the server, then syncs so the calendar follows.
     @discardableResult
-    private func perform(_ work: (PlannerAPI) async throws -> Void) async -> Bool {
+    func perform(_ work: (PlannerAPI) async throws -> Void) async -> Bool {
         guard let api = engine?.api else {
             actionError = "Add the server address and device token in Settings."
             return false
@@ -430,7 +430,7 @@ final class AppModel {
         let snap = 5 * 60.0
         var cursor = Date(timeIntervalSinceReferenceDate: (windowStart.timeIntervalSinceReferenceDate / snap).rounded(.up) * snap)
         var gaps: [Gap] = []
-        let busy = (state?.events ?? []).filter { !$0.allDay && $0.endAt > cursor && $0.startAt < windowEnd }.sorted { $0.startAt < $1.startAt }
+        let busy = (state?.events ?? []).filter { !$0.allDay && !$0.ignored && $0.endAt > cursor && $0.startAt < windowEnd }.sorted { $0.startAt < $1.startAt }
         for event in busy {
             if event.startAt > cursor { gaps.append(Gap(start: cursor, end: min(event.startAt, windowEnd))) }
             cursor = max(cursor, event.endAt)

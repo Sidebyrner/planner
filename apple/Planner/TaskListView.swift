@@ -9,6 +9,7 @@ enum TaskFilter: Hashable {
 }
 
 struct TaskListView: View {
+    @Environment(Router.self) private var router
     @Environment(AppModel.self) private var model
     @State private var showDone = false
     @State private var filter: TaskFilter = .all
@@ -89,6 +90,11 @@ struct TaskListView: View {
                 .disabled(model.isSyncing)
                 .keyboardShortcut("r")
             }
+            ToolbarItem {
+                Button { router.open(.flow(.board)) } label: { Label("Board", systemImage: "rectangle.split.3x1") }
+                    .help("See every task by status")
+            }
+            AddToolbar()
         }
     }
 }
