@@ -9,6 +9,11 @@ import { createApp } from '../src/server/app.js';
 function fakeGoogle() {
   const events = new Map<string, any>();
   const mail: { id: string; from: string; internalDate: number; snippet: string }[] = [];
+  /** Inbox threads: Gmail-shaped messages with headers and a base64url text body. */
+  const threads = new Map<string, any>();
+  const sent: any[] = [];
+  const modified: { id: string; remove: string[] }[] = [];
+  let grantScope = 'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send';
   const calls: string[] = [];
   let seq = 0;
   const fetchFn = (async (input: any, init: any = {}) => {
@@ -16,8 +21,23 @@ function fakeGoogle() {
     const method = init.method ?? 'GET';
     calls.push(`${method} ${url.pathname}`);
     const json = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status });
-    if (url.hostname === 'oauth2.googleapis.com') return json({ access_token: 'at', refresh_token: 'rt', expires_in: 3600 });
+    if (url.hostname === 'oauth2.googleapis.com') return json({ access_token: 'at', refresh_token: 'rt', expires_in: 3600, scope: grantScope });
     if (url.hostname === 'gmail.googleapis.com') {
+      const path = url.pathname.replace('/gmail/v1/users/me', '');
+      if (path === '/profile') return json({ emailAddress: 'me@example.com' });
+      if (path === '/threads') return json({ threads: [...threads.keys()].map((id) => ({ id })) });
+      const modify = /^\/threads\/([^/]+)\/modify$/.exec(path);
+      if (modify) {
+        modified.push({ id: decodeURIComponent(modify[1]), remove: JSON.parse(init.body).removeLabelIds });
+        return json({});
+      }
+      const thread = /^\/threads\/([^/]+)$/.exec(path);
+      if (thread) return json(threads.get(decodeURIComponent(thread[1])) ?? {});
+      if (path === '/messages/send') {
+        const body = JSON.parse(init.body);
+        sent.push({ ...body, decoded: Buffer.from(body.raw, 'base64url').toString('utf8') });
+        return json({ id: 'sent1', threadId: body.threadId });
+      }
       const msgId = url.pathname.split('/messages/')[1];
       if (msgId) return json(mail.find((m) => m.id === decodeURIComponent(msgId)) ?? {});
       const q = url.searchParams.get('q') ?? '';
@@ -40,7 +60,10 @@ function fakeGoogle() {
     if (method === 'DELETE') return events.delete(id) ? json(null, 204) : json({ error: { message: 'Not Found' } }, 404);
     return json({}, 400);
   }) as typeof fetch;
-  return { events, mail, calls, fetchFn };
+  return {
+    events, mail, threads, sent, modified, calls, fetchFn,
+    setScope: (scope: string) => { grantScope = scope; },
+  };
 }
 
 let server: Server;
@@ -638,5 +661,146 @@ describe('Gmail replies', () => {
     const { body: state } = await api('POST', '/api/gmail/check');
     expect(state.gmail.connected).toBe(false);
     expect(google.calls.some((c) => c.includes('/messages'))).toBe(false);
+  });
+});
+
+/** A Gmail message as the API returns it. */
+function gmailMessage(id: string, opts: { from: string; to: string; subject: string; text: string; at: number; unread?: boolean; messageId?: string }) {
+  return {
+    id,
+    internalDate: String(opts.at),
+    labelIds: ['INBOX', ...(opts.unread ? ['UNREAD'] : [])],
+    snippet: opts.text.slice(0, 60),
+    payload: {
+      mimeType: 'multipart/alternative',
+      headers: [
+        { name: 'From', value: opts.from },
+        { name: 'To', value: opts.to },
+        { name: 'Subject', value: opts.subject },
+        { name: 'Message-ID', value: opts.messageId ?? `<${id}@mail>` },
+      ],
+      parts: [{ mimeType: 'text/plain', body: { data: Buffer.from(opts.text).toString('base64url') } }],
+    },
+  };
+}
+
+describe('Gmail inbox', () => {
+  async function connectFromApp() {
+    const { body } = await api('POST', '/api/gmail/link');
+    const start = new URL(body.url);
+    expect(start.pathname).toBe('/api/gmail/start');
+    cookie = ''; // Google's page opens in a browser sheet with no Planner session
+    const go = await api('GET', start.pathname + start.search);
+    expect(go.status).toBe(302);
+    const state = new URL(go.headers.get('location')!).searchParams.get('state')!;
+    const done = await api('GET', `/api/google/callback?code=abc&state=${encodeURIComponent(state)}`);
+    expect(done.status).toBe(302);
+    return done.headers.get('location');
+  }
+
+  function seedThreads() {
+    const now = Date.now();
+    google.threads.set('t1', {
+      id: 't1',
+      messages: [
+        gmailMessage('m1', { from: 'Me <me@example.com>', to: 'Ryan Lee <ryan@farms.com>', subject: 'Prairie Farms quote', text: 'Hi Ryan, can you send the quote?', at: now - 7200_000 }),
+        gmailMessage('m2', {
+          from: 'Ryan Lee <ryan@farms.com>', to: 'me@example.com', subject: 'Re: Prairie Farms quote', unread: true, at: now - 3600_000,
+          text: 'Here it is, $1,200.\n\nSent from my iPhone\n\nOn Tue, Nov 24, 2026 at 9:00 AM Me <me@example.com> wrote:\n> Hi Ryan, can you send the quote?',
+        }),
+      ],
+    });
+    google.threads.set('t2', {
+      id: 't2',
+      messages: [gmailMessage('m3', { from: '"Ana Ruiz" <ana@studio.io>', to: 'me@example.com', subject: 'Logo files', text: 'Attached.\n-- \nAna Ruiz | Studio', at: now - 60_000 })],
+    });
+  }
+
+  it('connects from the app with a one-time link and comes back to the app', async () => {
+    expect(await connectFromApp()).toBe('planner://gmail-connected');
+    const { body } = await api('GET', '/api/state');
+    expect(body.gmail).toMatchObject({ connected: true, canReply: true });
+    expect(body.google.connected).toBe(false);
+  });
+
+  it('refuses a reused or unknown app link', async () => {
+    const { body } = await api('POST', '/api/gmail/link');
+    const start = new URL(body.url);
+    const state = start.searchParams.get('state')!;
+    cookie = '';
+    await api('GET', `/api/google/callback?code=abc&state=${encodeURIComponent(state)}`); // uses it up
+    const again = await api('GET', `/api/google/callback?code=abc&state=${encodeURIComponent(state)}`);
+    expect(again.headers.get('location')).toBe('/');
+    expect((await api('GET', '/api/gmail/start?state=gmail.app.nope')).status).toBe(400);
+  });
+
+  it('says so when Gmail is not connected', async () => {
+    const res = await api('GET', '/api/inbox');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Gmail is not connected/);
+  });
+
+  it('groups threads by person, people you are waiting on first', async () => {
+    await connectFromApp();
+    seedThreads();
+    const waiting = (await api('POST', '/api/tasks', { title: 'Quote from Ryan', status: 'waiting', waitingOn: 'Ryan', contact: { name: 'Ryan', email: 'ryan@farms.com' } })).body;
+    const { body } = await api('GET', '/api/inbox');
+    expect(body.people.map((p: any) => p.email)).toEqual(['ryan@farms.com', 'ana@studio.io']);
+    expect(body.people[0]).toMatchObject({ name: 'Ryan Lee', unread: 1, taskIds: [waiting.id] });
+    expect(body.people[0].threads[0]).toMatchObject({ id: 't1', subject: 'Prairie Farms quote', unread: true, messageCount: 2 });
+    expect(body.people[1]).toMatchObject({ name: 'Ana Ruiz', unread: 0, taskIds: [] });
+  });
+
+  it('reads a thread as clean text without quotes or signatures', async () => {
+    await connectFromApp();
+    seedThreads();
+    const { body } = await api('GET', '/api/inbox/threads/t1');
+    expect(body.subject).toBe('Prairie Farms quote');
+    expect(body.messages.map((m: any) => [m.fromMe, m.text])).toEqual([
+      [true, 'Hi Ryan, can you send the quote?'],
+      [false, 'Here it is, $1,200.'],
+    ]);
+    expect((await api('GET', '/api/inbox/threads/t2')).body.messages[0].text).toBe('Attached.');
+  });
+
+  it('replies in the thread and counts it as chasing a waiting follow-up', async () => {
+    await connectFromApp();
+    seedThreads();
+    const waiting = (await api('POST', '/api/tasks', { title: 'Quote from Ryan', status: 'waiting', waitingOn: 'Ryan', contact: { name: 'Ryan', email: 'ryan@farms.com' } })).body;
+    await api('PATCH', `/api/tasks/${waiting.id}`, { status: 'todo' }); // follow-up came due
+    const res = await api('POST', '/api/inbox/threads/t1/reply', { text: 'Thanks Ryan, booking it now.' });
+    expect(res.status).toBe(200);
+    expect(google.sent).toHaveLength(1);
+    expect(google.sent[0].threadId).toBe('t1');
+    expect(google.sent[0].decoded).toContain('To: "Ryan Lee" <ryan@farms.com>');
+    expect(google.sent[0].decoded).toContain('Subject: Re: Prairie Farms quote');
+    expect(google.sent[0].decoded).toContain('In-Reply-To: <m2@mail>');
+    expect(google.sent[0].decoded).toContain('Thanks Ryan, booking it now.');
+    const task = (await api('GET', '/api/state')).body.tasks.find((t: any) => t.id === waiting.id);
+    expect(task.status).toBe('waiting');
+    expect(Date.parse(task.followUpAt)).toBeGreaterThan(Date.now() + 86400_000);
+  });
+
+  it('marks read, archives, and files email as a task or a follow-up', async () => {
+    await connectFromApp();
+    seedThreads();
+    expect((await api('POST', '/api/inbox/threads/t1/read')).body).toEqual({ ok: true });
+    expect((await api('POST', '/api/inbox/threads/t2/archive')).body).toEqual({ ok: true });
+    expect(google.modified).toEqual([{ id: 't1', remove: ['UNREAD'] }, { id: 't2', remove: ['INBOX'] }]);
+
+    const task = (await api('POST', '/api/inbox/threads/t1/task', { kind: 'task' })).body;
+    expect(task).toMatchObject({ title: 'Prairie Farms quote', source: 'gmail', externalRef: 't1', status: 'todo', contact: { name: 'Ryan Lee', email: 'ryan@farms.com' } });
+    const followUp = (await api('POST', '/api/inbox/threads/t2/task', { kind: 'followup' })).body;
+    expect(followUp).toMatchObject({ title: 'Logo files', status: 'waiting', waitingOn: 'Ana Ruiz' });
+  });
+
+  it('asks an older read-only connection to reconnect before replying', async () => {
+    google.setScope('https://www.googleapis.com/auth/gmail.readonly');
+    await connectFromApp();
+    seedThreads();
+    expect((await api('GET', '/api/state')).body.gmail.canReply).toBe(false);
+    const res = await api('POST', '/api/inbox/threads/t1/reply', { text: 'hi' });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Reconnect Gmail/);
   });
 });

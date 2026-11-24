@@ -7,7 +7,8 @@ const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const API = 'https://www.googleapis.com/calendar/v3';
 const SCOPE = 'https://www.googleapis.com/auth/calendar.events';
 const GMAIL_API = 'https://gmail.googleapis.com/gmail/v1/users/me';
-const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
+// Read, mark read and archive (modify), and reply (send). Older connections may have read-only.
+const GMAIL_SCOPE = 'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send';
 const CALENDAR = 'primary';
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -15,6 +16,8 @@ interface Tokens {
   accessToken: string;
   refreshToken: string;
   expiresAt: number;
+  /** What Google granted, space-separated. Missing on connections made before it was kept. */
+  scope?: string;
 }
 
 export interface GoogleConfig {
@@ -67,8 +70,13 @@ class GoogleAccount {
       redirect_uri: this.config.redirectUri,
     });
     if (!data.refresh_token) throw new Error('Google did not return a refresh token. Remove Planner under your Google account permissions and connect again.');
-    this.saveTokens(data, data.refresh_token);
+    this.saveTokens(data, data.refresh_token, data.scope);
     this.store.setValue(this.errorKey, null);
+  }
+
+  /** The scopes Google granted, as recorded at sign-in. */
+  protected grantedScope(): string {
+    return this.store.getValue<Tokens>(this.tokenKey)?.scope ?? '';
   }
 
   protected clearTokens(): void {
@@ -90,11 +98,12 @@ class GoogleAccount {
     return data;
   }
 
-  private saveTokens(data: any, refreshToken: string): Tokens {
+  private saveTokens(data: any, refreshToken: string, scope?: string): Tokens {
     const tokens: Tokens = {
       accessToken: data.access_token,
       refreshToken,
       expiresAt: Date.now() + (data.expires_in ?? 3600) * 1000,
+      scope: data.scope ?? scope,
     };
     this.store.setValue(this.tokenKey, tokens);
     return tokens;
@@ -105,7 +114,7 @@ class GoogleAccount {
     if (!tokens) throw new Error('Google is not connected.');
     if (tokens.expiresAt - 60_000 < Date.now()) {
       const data = await this.tokenRequest({ grant_type: 'refresh_token', refresh_token: tokens.refreshToken });
-      tokens = this.saveTokens(data, tokens.refreshToken);
+      tokens = this.saveTokens(data, tokens.refreshToken, tokens.scope);
     }
     return tokens.accessToken;
   }
@@ -244,8 +253,8 @@ export interface Reply {
 }
 
 /**
- * Read-only Gmail access, used for one thing: noticing when someone you're waiting on has
- * emailed you back. It never sends, changes or stores mail beyond a short snippet.
+ * Gmail for the inbox: list and read threads, reply, mark read and archive, and notice when
+ * someone you're waiting on has emailed back. Planner keeps no mail beyond a short snippet.
  */
 export class Gmail extends GoogleAccount {
   constructor(store: Store, config: GoogleConfig, fetchFn: FetchFn = fetch) {
@@ -258,20 +267,68 @@ export class Gmail extends GoogleAccount {
       connected: this.connected,
       lastCheckAt: this.store.getValue<string>('gmail_last_check'),
       error: this.store.getValue<string>('gmail_error'),
+      canReply: this.canReply,
     };
+  }
+
+  /** Connected with permission to send and change labels (not an older read-only sign-in). */
+  get canReply(): boolean {
+    const scope = this.grantedScope();
+    return this.connected && scope.includes('gmail.send') && scope.includes('gmail.modify');
   }
 
   disconnect(): void {
     this.clearTokens();
+    this.store.setValue('gmail_me', null);
     this.store.setValue('gmail_last_check', null);
     this.store.setValue('gmail_error', null);
   }
 
-  private async get(path: string): Promise<any> {
-    const res = await this.fetchFn(`${GMAIL_API}${path}`, { headers: { authorization: `Bearer ${await this.accessToken()}` } });
+  private async request(method: string, path: string, body?: unknown): Promise<any> {
+    const res = await this.fetchFn(`${GMAIL_API}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${await this.accessToken()}`,
+        ...(body ? { 'content-type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
     const data: any = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(`Gmail: ${data?.error?.message || res.status}`);
     return data;
+  }
+
+  private get(path: string): Promise<any> {
+    return this.request('GET', path);
+  }
+
+  /** The signed-in address, remembered after the first look. */
+  async myEmail(): Promise<string> {
+    const saved = this.store.getValue<string>('gmail_me');
+    if (saved) return saved;
+    const profile = await this.get('/profile');
+    const email = String(profile.emailAddress ?? '').toLowerCase();
+    this.store.setValue('gmail_me', email);
+    return email;
+  }
+
+  async listThreadIds(q: string, max = 50): Promise<string[]> {
+    const list = await this.get(`/threads?${new URLSearchParams({ q, maxResults: String(max) })}`);
+    return (list.threads ?? []).map((t: any) => String(t.id));
+  }
+
+  async getThread(id: string, format: 'metadata' | 'full'): Promise<any> {
+    const params = new URLSearchParams({ format });
+    if (format === 'metadata') for (const h of ['From', 'To', 'Subject', 'Date', 'Message-ID', 'References']) params.append('metadataHeaders', h);
+    return this.get(`/threads/${encodeURIComponent(id)}?${params}`);
+  }
+
+  async send(raw: string, threadId: string): Promise<any> {
+    return this.request('POST', '/messages/send', { raw, threadId });
+  }
+
+  async modifyThread(id: string, removeLabelIds: string[]): Promise<void> {
+    await this.request('POST', `/threads/${encodeURIComponent(id)}/modify`, { removeLabelIds });
   }
 
   /** The newest email from `email` received after `since`, if any. */
@@ -289,7 +346,7 @@ export class Gmail extends GoogleAccount {
   }
 }
 
-function decodeEntities(text: string): string {
+export function decodeEntities(text: string): string {
   return text
     .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')

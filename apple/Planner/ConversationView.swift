@@ -5,6 +5,7 @@ import SwiftUI
 /// subject marked where a thread changes. Reply at the bottom; make a task or a follow-up above.
 struct ConversationView: View {
     @Environment(AppModel.self) private var model
+    @Environment(Router.self) private var router
     @Environment(\.dismiss) private var dismiss
     let person: InboxPerson
 
@@ -86,6 +87,9 @@ struct ConversationView: View {
         }
         .animation(.planner, value: madeTask)
         .task { await load() }
+        // A chat gets the whole screen: no tab bar or floating buttons over the reply bar.
+        .onAppear { router.chromeHidden = true }
+        .onDisappear { router.chromeHidden = false }
     }
 
     private func load() async {

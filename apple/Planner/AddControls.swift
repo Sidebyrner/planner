@@ -145,6 +145,9 @@ final class Router {
     /// UserDefaults, which is how screenshots and Siri ("What's next") open a specific screen.
     var place: Place = Place(rawValue: UserDefaults.standard.string(forKey: "PlannerTab") ?? "") ?? .today
 
+    /// A full-screen page (a conversation) hides the tab bar and floating buttons.
+    var chromeHidden = false
+
     /// Bumped to send a tab back to its first page.
     var resets: [Place: Int] = [:]
 

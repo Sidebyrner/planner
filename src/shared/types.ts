@@ -240,6 +240,42 @@ export interface GmailStatus {
   connected: boolean;
   lastCheckAt: string | null;
   error: string | null;
+  /** Allowed to reply, mark read and archive (an older read-only connection is not). */
+  canReply: boolean;
+}
+
+export interface InboxThread {
+  id: string;
+  subject: string;
+  snippet: string;
+  lastAt: string;
+  unread: boolean;
+  messageCount: number;
+}
+
+/** Everyone who emailed lately, with their threads, like a Messages list. */
+export interface InboxPerson {
+  email: string;
+  name: string;
+  lastAt: string;
+  unread: number;
+  threads: InboxThread[];
+  /** Open tasks with this person as their contact. */
+  taskIds: string[];
+}
+
+export interface InboxMessage {
+  id: string;
+  from: { name: string; email: string };
+  fromMe: boolean;
+  at: string;
+  text: string;
+}
+
+export interface InboxConversation {
+  id: string;
+  subject: string;
+  messages: InboxMessage[];
 }
 
 export interface AppState {

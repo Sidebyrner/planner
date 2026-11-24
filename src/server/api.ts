@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { PROJECT_COLORS, type AppState } from '../shared/types.js';
 import { randomToken, type Auth } from './auth.js';
 import { DeviceSync, syncDevice } from './device.js';
+import { Inbox } from './inbox.js';
 import { NotFound, ReadOnly, TimezoneUnset, type Planner } from './planner.js';
 
 const when = z.string().refine((v) => !Number.isNaN(Date.parse(v)), 'Not a valid date');
@@ -139,6 +140,7 @@ const h = (fn: Handler) => (req: Request, res: Response, next: NextFunction) => 
 
 export function apiRouter(planner: Planner, auth: Auth): Router {
   const r = Router();
+  const inbox = new Inbox(planner, planner.gmail);
 
   r.get('/me', h((req) => ({ signedIn: auth.isSignedIn(req), loginRequired: auth.loginRequired })));
 
@@ -152,6 +154,55 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
 
   r.post('/logout', h((_req, res) => auth.logout(res)));
 
+  // ---- Google sign-in callback: Calendar and Gmail, from the web (cookie) or the app (a
+  // one-time state kept on the server). Reached from Google's page, so no session is needed.
+
+  const appStates = () => planner.store.getValue<Record<string, number>>('gmail_app_states') ?? {};
+  const takeAppState = (state: string): boolean => {
+    const states = appStates();
+    const expires = states[state];
+    if (!expires) return false;
+    delete states[state];
+    planner.store.setValue('gmail_app_states', states);
+    return expires > Date.now();
+  };
+
+  r.get('/gmail/start', (req, res) => {
+    const state = String(req.query.state ?? '');
+    const expires = appStates()[state];
+    if (!planner.gmail?.configured) return void res.status(400).send('Google is not set up on this server.');
+    if (!expires || expires < Date.now()) return void res.status(400).send('This sign-in link has expired. Start again from the app.');
+    res.redirect(planner.gmail.authUrl(state));
+  });
+
+  r.get('/google/callback', async (req, res) => {
+    const { code, state, error } = req.query as Record<string, string | undefined>;
+    const fromApp = !!state && state.startsWith('gmail.app.') && takeAppState(state);
+    const cookieOk = !!state && state === req.cookies?.planner_oauth;
+    res.clearCookie('planner_oauth');
+    const back = (message?: string) =>
+      fromApp
+        ? res.redirect(`planner://gmail-connected${message ? `?error=${encodeURIComponent(message)}` : ''}`)
+        : res.redirect('/');
+    try {
+      if (error) throw new Error(`Google declined the connection (${error}).`);
+      if (!code || !state || !(fromApp || cookieOk)) throw new Error('The connection attempt expired. Start again from Settings.');
+      if (state.startsWith('gmail.') && planner.gmail) {
+        await planner.gmail.exchangeCode(code);
+        inbox.clearCache();
+        await planner.checkReplies().catch(() => {});
+      } else {
+        await planner.google.exchangeCode(code);
+        await planner.sync();
+      }
+      back();
+    } catch (err) {
+      const message = (err as Error).message;
+      planner.store.setValue(state?.startsWith('gmail.') ? 'gmail_error' : 'google_error', message);
+      back(message);
+    }
+  });
+
   r.use(auth.requireSession);
 
   const state = (): AppState => ({
@@ -163,7 +214,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
       to: new Date(Date.now() + 120 * 86400_000).toISOString(),
     }),
     settings: planner.getSettings(),
-    gmail: planner.gmail?.status() ?? { configured: false, connected: false, lastCheckAt: null, error: null },
+    gmail: planner.gmail?.status() ?? { configured: false, connected: false, lastCheckAt: null, error: null, canReply: false },
     google: planner.google.status(),
   });
 
@@ -233,27 +284,39 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     return state();
   }));
 
-  r.post('/gmail/disconnect', h(() => planner.gmail?.disconnect()));
+  r.post('/gmail/disconnect', h(() => {
+    inbox.clearCache();
+    planner.gmail?.disconnect();
+  }));
 
-  r.get('/google/callback', async (req, res) => {
-    const { code, state, error } = req.query as Record<string, string | undefined>;
-    res.clearCookie('planner_oauth');
-    try {
-      if (error) throw new Error(`Google declined the connection (${error}).`);
-      if (!code || !state || state !== req.cookies?.planner_oauth) throw new Error('The connection attempt expired. Start again from Settings.');
-      if (state.startsWith('gmail.') && planner.gmail) {
-        await planner.gmail.exchangeCode(code);
-        await planner.checkReplies();
-      } else {
-        await planner.google.exchangeCode(code);
-        await planner.sync();
-      }
-      res.redirect('/');
-    } catch (err) {
-      planner.store.setValue(state?.startsWith('gmail.') ? 'gmail_error' : 'google_error', (err as Error).message);
-      res.redirect('/');
-    }
-  });
+  // The app asks for a one-time link, opens it in Google's sign-in sheet, and comes back to
+  // planner://gmail-connected.
+  r.post('/gmail/link', h((req) => {
+    if (!planner.gmail?.configured) throw new Error('Google is not set up on this server. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.');
+    const state = `gmail.app.${randomToken()}`;
+    const states = Object.fromEntries(Object.entries(appStates()).filter(([, exp]) => exp > Date.now()));
+    states[state] = Date.now() + 10 * 60 * 1000;
+    planner.store.setValue('gmail_app_states', states);
+    return { url: `${req.protocol}://${req.get('host')}/api/gmail/start?state=${encodeURIComponent(state)}` };
+  }));
+
+  // ---- Inbox
+
+  const threadId = (req: Request) => z.string().min(1).max(200).parse(req.params.id);
+
+  r.get('/inbox', h(async () => ({ people: await inbox.people() })));
+  r.get('/inbox/threads/:id', h((req) => inbox.thread(threadId(req))));
+  r.post('/inbox/threads/:id/reply', h((req) => inbox.reply(threadId(req), z.object({ text: z.string().trim().min(1).max(20000) }).parse(req.body).text)));
+  r.post('/inbox/threads/:id/read', h(async (req) => {
+    await inbox.markRead(threadId(req));
+    return { ok: true };
+  }));
+  r.post('/inbox/threads/:id/archive', h(async (req) => {
+    await inbox.archive(threadId(req));
+    return { ok: true };
+  }));
+  r.post('/inbox/threads/:id/task', h((req) =>
+    inbox.makeTask(threadId(req), z.object({ kind: z.enum(['task', 'followup']) }).parse(req.body).kind)));
 
   r.post('/google/sync', h(async () => {
     await planner.sync();
@@ -270,7 +333,7 @@ export function apiRouter(planner: Planner, auth: Auth): Router {
     if (err instanceof ReadOnly) return void res.status(409).json({ error: err.message });
     if (err instanceof TimezoneUnset) return void res.status(409).json({ error: err.message });
     const message = err instanceof Error ? err.message : 'Something went wrong.';
-    const expected = /must end after|Invalid date|Google|sync window|already a project|project (needs|tag needs)/.test(message);
+    const expected = /must end after|Invalid date|Google|Gmail|sync window|already a project|project (needs|tag needs)|email thread|No one to reply/.test(message);
     if (!expected) console.error(err);
     res.status(expected ? 400 : 500).json({ error: expected ? message : 'Something went wrong on the server.' });
   });

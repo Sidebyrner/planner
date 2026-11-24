@@ -50,14 +50,14 @@ struct ContentView: View {
             tab(.projects) { ProjectsHomeView() }
         }
         .overlay(alignment: .bottom) {
-            if !keyboardUp {
+            if !keyboardUp && !router.chromeHidden {
                 PlannerTabBar()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
         .overlay(alignment: .bottomTrailing) {
             // Tasks has its own add field and mic along the bottom.
-            if !keyboardUp && router.place != .tasks {
+            if !keyboardUp && !router.chromeHidden && router.place != .tasks {
                 FloatingAddButton()
                     .padding(.trailing, 18)
                     .padding(.bottom, Self.tabBarRoom + 18)
@@ -65,6 +65,7 @@ struct ContentView: View {
             }
         }
         .animation(.planner, value: keyboardUp)
+        .animation(.planner, value: router.chromeHidden)
         .animation(.planner, value: router.place)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboardUp = true }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboardUp = false }
@@ -88,9 +89,10 @@ extension ContentView {
                     ToolbarItem(placement: .topBarTrailing) { SettingsButton() }
                 }
                 .syncBanner()
-                .safeAreaInset(edge: .bottom, spacing: 0) {
-                    Color.clear.frame(height: keyboardUp ? 0 : Self.tabBarRoom)
-                }
+        }
+        // On the stack, so pushed pages (a project, a conversation) keep clear of the bar too.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: keyboardUp || router.chromeHidden ? 0 : Self.tabBarRoom)
         }
         // Tapping the tab again rebuilds its stack: back to the first page, scrolled to the top.
         .id(router.resets[place, default: 0])

@@ -96,14 +96,14 @@ Planner syncs your primary calendar, from two weeks back to sixty days ahead. It
 
 While the consent screen is in "Testing" mode, Google expires the connection after seven days. Publish the app (no review is needed for personal use with your own account) to keep it connected.
 
-## Notice Gmail replies to follow-ups
+## Gmail inbox and replies to follow-ups
 
-Planner can watch for an email back from someone you're waiting on, and mark that follow-up **Replied** (with the start of their email) on every device. It's read-only and separate from Google Calendar, so connecting it doesn't change where your calendar comes from.
+The iPhone and Mac apps have an **Inbox** tab: your Gmail Primary inbox from the last 30 days, grouped by person like Messages. You can read, reply, mark read, archive, and turn an email into a task or a "waiting on them" follow-up. People you're waiting on stay on top, and Planner marks a follow-up **Replied** (with the start of their email) when they write back. Replying to someone you're waiting on counts as chasing them: the follow-up moves two days on. It's separate from Google Calendar, so connecting it doesn't change where your calendar comes from.
 
-1. In the same Google Cloud project, enable the **Gmail API** and add the scope `https://www.googleapis.com/auth/gmail.readonly` to the consent screen. Gmail uses the same client ID, secret and redirect URI as Calendar.
-2. Open Settings in the web app and choose **Connect Gmail**.
+1. In the same Google Cloud project, enable the **Gmail API** and add the scopes `https://www.googleapis.com/auth/gmail.modify` and `https://www.googleapis.com/auth/gmail.send` to the consent screen. Gmail uses the same client ID, secret and redirect URI as Calendar.
+2. In the app, open **Inbox** and tap **Connect Gmail** (or use **Connect Gmail** in the web app's Settings). Google's sign-in sheet opens and brings you back to the app.
 
-Planner checks every ten minutes (and when you open the app) for mail from each waiting follow-up's email address, sent after the wait began or after you last chased them. Follow-ups without an email address aren't checked. Text messages can't be read by any app on iOS, so replies by text still need a tap on **Got it**.
+A connection made before replies were added is read-only; the Inbox offers **Reconnect Gmail** to upgrade it. Planner checks for replies every ten minutes and when you open the app, for follow-ups that have the person's email address. Text messages can't be read by any app on iOS, so replies by text still need a tap on **Got it**.
 
 ## Host it
 
