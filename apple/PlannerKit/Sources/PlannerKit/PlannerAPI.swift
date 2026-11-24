@@ -146,6 +146,43 @@ public struct PlannerAPI: Sendable {
 
     // MARK: Plumbing
 
+    // MARK: Gmail inbox
+
+    /// A one-time Google sign-in page for connecting Gmail from the app.
+    public func gmailLink() async throws -> URL {
+        struct Link: Decodable { var url: URL }
+        return try await call("POST", "api/gmail/link", as: Link.self).url
+    }
+
+    public func inbox() async throws -> [InboxPerson] {
+        struct Inbox: Decodable { var people: [InboxPerson] }
+        return try await call("GET", "api/inbox", as: Inbox.self).people
+    }
+
+    public func thread(id: String) async throws -> InboxConversation {
+        try await call("GET", "api/inbox/threads/\(id)")
+    }
+
+    public func reply(threadId: String, text: String) async throws -> InboxConversation {
+        struct Body: Encodable { var text: String }
+        return try await call("POST", "api/inbox/threads/\(threadId)/reply", body: Body(text: text))
+    }
+
+    public func markRead(threadId: String) async throws {
+        _ = try await call("POST", "api/inbox/threads/\(threadId)/read", as: OK.self)
+    }
+
+    public func archive(threadId: String) async throws {
+        _ = try await call("POST", "api/inbox/threads/\(threadId)/archive", as: OK.self)
+    }
+
+    public enum ThreadTaskKind: String, Encodable, Sendable { case task, followup }
+
+    public func makeTask(threadId: String, kind: ThreadTaskKind) async throws -> PlannerTask {
+        struct Body: Encodable { var kind: ThreadTaskKind }
+        return try await call("POST", "api/inbox/threads/\(threadId)/task", body: Body(kind: kind))
+    }
+
     private struct OK: Decodable {}
     private struct ErrorBody: Decodable { var error: String }
 

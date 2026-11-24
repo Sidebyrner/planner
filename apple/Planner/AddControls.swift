@@ -93,22 +93,22 @@ final class Router {
     /// The app's main sections: tabs on iPhone, the sidebar picker on the Mac (where the
     /// calendar is always on the right instead).
     enum Place: String, CaseIterable, Identifiable {
-        case today, tasks, projects, calendar, routines
+        case inbox, calendar, today, tasks, projects
         var id: String { rawValue }
 
         var title: String { rawValue.capitalized }
 
         var symbol: String {
             switch self {
+            case .inbox: "tray"
+            case .calendar: "calendar"
             case .today: "sun.max"
             case .tasks: "checklist"
-            case .projects: "folder"
-            case .calendar: "calendar"
-            case .routines: "list.bullet.rectangle.portrait"
+            case .projects: "square.grid.2x2"
             }
         }
 
-        static var sidebar: [Place] { [.today, .tasks, .projects, .routines] }
+        static var sidebar: [Place] { [.inbox, .today, .tasks, .projects] }
     }
 
     enum Sheet: Identifiable {
@@ -121,6 +121,7 @@ final class Router {
         case board(projectId: String?)
         case settings
         case nudge(taskId: String, channel: Nudge.Channel? = nil)
+        case routines
 
         var id: String {
             switch self {
@@ -133,6 +134,7 @@ final class Router {
             case .board(let id): "board-\(id ?? "all")"
             case .settings: "settings"
             case let .nudge(id, channel): "nudge-\(id)-\(channel?.rawValue ?? "")"
+            case .routines: "routines"
             }
         }
     }
@@ -143,12 +145,24 @@ final class Router {
     /// UserDefaults, which is how screenshots and Siri ("What's next") open a specific screen.
     var place: Place = Place(rawValue: UserDefaults.standard.string(forKey: "PlannerTab") ?? "") ?? .today
 
+    /// Bumped to send a tab back to its first page.
+    var resets: [Place: Int] = [:]
+
     func go(_ place: Place) {
         #if os(macOS)
         self.place = place == .calendar ? .today : place
         #else
         self.place = place
         #endif
+    }
+
+    /// A tab tapped: switch to it, or if it's already showing, go back to its first page.
+    func tap(_ place: Place) {
+        if self.place == place {
+            resets[place, default: 0] += 1
+        } else {
+            go(place)
+        }
     }
 
     func open(_ sheet: Sheet) {
@@ -186,6 +200,16 @@ struct RouterSheets: ViewModifier {
                 #endif
             case let .nudge(taskId, channel):
                 NudgeSheet(taskId: taskId, channel: channel)
+            case .routines:
+                NavigationStack {
+                    RoutinesView()
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) { Button("Done") { router.sheet = nil } }
+                        }
+                }
+                #if os(macOS)
+                .frame(minWidth: 520, minHeight: 640)
+                #endif
             case .settings:
                 NavigationStack {
                     SettingsView()
@@ -304,6 +328,8 @@ struct AddToolbar: ToolbarContent {
     var showFlows = false
 
     var body: some ToolbarContent {
+        // On iPhone the floating mic and + (and the Tasks search bar) do this job.
+        #if os(macOS)
         ToolbarItemGroup(placement: .primaryAction) {
             if showFlows {
                 Menu {
@@ -325,6 +351,33 @@ struct AddToolbar: ToolbarContent {
             }
             .help("New task, event or block of time")
         }
+        #else
+        ToolbarItemGroup(placement: .primaryAction) {}
+        #endif
+    }
+}
+
+/// The way into Settings from every tab's first page (top right, where Apple's apps keep the
+/// account button). A dot shows whether syncing is healthy.
+struct SettingsButton: View {
+    @Environment(Router.self) private var router
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        Button { router.open(.settings) } label: {
+            Image(systemName: "person.crop.circle")
+                .font(.system(size: 20, weight: .regular))
+                .overlay(alignment: .topTrailing) {
+                    Circle()
+                        .fill(model.syncError == nil ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().strokeBorder(Color.pageBackground, lineWidth: 1.5))
+                        .offset(x: 2, y: -1)
+                }
+        }
+        .accessibilityLabel("Settings")
+        .accessibilityValue(model.syncError == nil ? "Synced" : "Not synced")
+        .help("Settings")
     }
 }
 

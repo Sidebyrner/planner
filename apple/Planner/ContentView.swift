@@ -43,7 +43,7 @@ struct ContentView: View {
         // The system tab bar can't make one tab stand out, so the tabs keep their state in a
         // TabView with its bar hidden and our own bar sits along the bottom.
         TabView(selection: $router.place) {
-            tab(.routines) { RoutinesView() }
+            tab(.inbox) { InboxView() }
             tab(.calendar) { CalendarView() }
             tab(.today) { TodayView() }
             tab(.tasks) { TaskListView() }
@@ -84,89 +84,111 @@ extension ContentView {
     private func tab<V: View>(_ place: Router.Place, @ViewBuilder content: () -> V) -> some View {
         NavigationStack {
             content()
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { SettingsButton() }
+                }
                 .syncBanner()
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     Color.clear.frame(height: keyboardUp ? 0 : Self.tabBarRoom)
                 }
         }
+        // Tapping the tab again rebuilds its stack: back to the first page, scrolled to the top.
+        .id(router.resets[place, default: 0])
         .toolbar(.hidden, for: .tabBar)
         .tag(place)
     }
 }
 
-/// The bottom bar: Routines · Calendar · Today · Tasks · Projects, with Today raised in the
-/// middle as the app's home.
+/// The bottom bar, icons only: Inbox · Calendar · Today · Tasks · Projects, with Today raised in
+/// the middle as the app's home. Tapping the tab you're on takes it back to its first page.
 struct PlannerTabBar: View {
     @Environment(Router.self) private var router
+    @Environment(AppModel.self) private var model
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            item(.routines)
+        HStack(alignment: .center, spacing: 0) {
+            item(.inbox, badge: model.inboxUnread)
             item(.calendar)
             today
             item(.tasks)
             item(.projects)
         }
-        .padding(.horizontal, 6)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-        .background {
-            Capsule(style: .continuous)
-                .fill(.regularMaterial)
-                .overlay(Capsule(style: .continuous).strokeBorder(Color.cardBorder, lineWidth: 0.75))
-                .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
-                .padding(.top, 2)
-        }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 8)
+        .frame(height: 58)
+        .background { barBackground }
+        .padding(.horizontal, 18)
         .padding(.bottom, 2)
         .sensoryFeedback(.selection, trigger: router.place)
     }
 
-    private func select(_ place: Router.Place) {
-        withAnimation(reduceMotion ? nil : .planner) { router.go(place) }
+    @ViewBuilder private var barBackground: some View {
+        let shape = Capsule(style: .continuous)
+        if #available(iOS 26.0, *) {
+            Color.clear.glassEffect(.regular, in: shape)
+                .shadow(color: .black.opacity(0.1), radius: 14, y: 4)
+        } else {
+            shape.fill(.regularMaterial)
+                .overlay(shape.strokeBorder(Color.cardBorder, lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.12), radius: 16, y: 4)
+        }
     }
 
-    private func item(_ place: Router.Place) -> some View {
+    private func tap(_ place: Router.Place) {
+        withAnimation(reduceMotion ? nil : .planner) { router.tap(place) }
+    }
+
+    private func item(_ place: Router.Place, badge: Int = 0) -> some View {
         let on = router.place == place
-        return Button { select(place) } label: {
-            VStack(spacing: 3) {
+        return Button { tap(place) } label: {
+            VStack(spacing: 5) {
                 Image(systemName: place.symbol)
-                    .font(.system(size: 19, weight: on ? .semibold : .regular))
+                    .font(.system(size: 22, weight: on ? .semibold : .regular))
                     .symbolVariant(on ? .fill : .none)
-                    .frame(height: 24)
-                Text(place.title).font(.caption2.weight(on ? .semibold : .medium))
+                    .frame(height: 26)
+                    .overlay(alignment: .topTrailing) {
+                        if badge > 0 {
+                            Text(badge > 99 ? "99+" : "\(badge)")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 5)
+                                .frame(minWidth: 18, minHeight: 18)
+                                .background(Color.red, in: Capsule())
+                                .offset(x: 10, y: -6)
+                                .contentTransition(.numericText())
+                        }
+                    }
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 5, height: 5)
+                    .opacity(on ? 1 : 0)
             }
-            .foregroundStyle(on ? Color.accentColor : Color.secondary)
-            .frame(maxWidth: .infinity, minHeight: 48)
+            .foregroundStyle(on ? Color.accentColor : Color.primary.opacity(0.55))
+            .frame(maxWidth: .infinity, minHeight: 52)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.pressable(scale: 0.9))
+        .buttonStyle(.pressable(scale: 0.88))
         .accessibilityLabel(place.title)
+        .accessibilityValue(badge > 0 ? "\(badge) unread" : "")
         .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+        .accessibilityHint(on ? "Back to the first page" : "")
     }
 
-    /// Today: a raised ink disc that fills the middle slot.
+    /// Today: a raised ink disc in the middle slot.
     private var today: some View {
         let on = router.place == .today
-        return Button { select(.today) } label: {
-            VStack(spacing: 3) {
-                Image(systemName: "sun.max.fill")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Color.onInk)
-                    .symbolEffect(.bounce, value: on)
-                    .frame(width: 56, height: 56)
-                    .background(Color.ink, in: Circle())
-                    .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: on ? 2.5 : 0).padding(-4))
-                    .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
-                    .scaleEffect(on ? 1.04 : 1)
-                Text("Today")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(on ? Color.accentColor : Color.primary)
-            }
-            .offset(y: -10)
-            .padding(.bottom, -10)
-            .frame(maxWidth: .infinity)
+        return Button { tap(.today) } label: {
+            Image(systemName: "sun.max.fill")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundStyle(Color.onInk)
+                .symbolEffect(.bounce, value: on)
+                .frame(width: 60, height: 60)
+                .background(Color.ink, in: Circle())
+                .overlay(Circle().strokeBorder(Color.accentColor, lineWidth: on ? 2.5 : 0).padding(-4))
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 4)
+                .scaleEffect(on ? 1.04 : 1)
+                .offset(y: -12)
+                .frame(maxWidth: .infinity)
         }
         .buttonStyle(.pressable(scale: 0.9))
         .accessibilityLabel("Today")
@@ -190,14 +212,25 @@ struct SidebarView: View {
             .labelsHidden()
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            switch router.place {
-            case .today, .calendar: TodayView()
-            case .tasks: TaskListView()
-            case .projects:
-                // Its own stack, so a project opens in the sidebar with the calendar still beside it.
-                NavigationStack { ProjectsHomeView() }
-            case .routines: NavigationStack { RoutinesView() }
+            Group {
+                switch router.place {
+                case .today, .calendar: TodayView()
+                case .tasks: TaskListView()
+                // Their own stacks, so a project or conversation opens in the sidebar with the
+                // calendar still beside it.
+                case .projects: NavigationStack { ProjectsHomeView() }
+                case .inbox: NavigationStack { InboxView() }
+                }
             }
+            .frame(maxHeight: .infinity)
+            HStack {
+                SettingsButton().buttonStyle(.borderless)
+                Spacer()
+                Button { router.open(.routines) } label: { Label("Routines", systemImage: "list.bullet.rectangle.portrait") }
+                    .buttonStyle(.borderless)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
     }
 }

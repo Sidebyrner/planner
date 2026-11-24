@@ -722,49 +722,61 @@ struct BoardView: View {
     @State private var who = ""
     @State private var target: AppModel.BoardColumn?
 
-    init(projectId: String? = nil) {
+    /// Shown inside the Tasks tab: no Close button and no navigation of its own.
+    var embedded = false
+
+    init(projectId: String? = nil, embedded: Bool = false) {
         _projectId = State(initialValue: projectId)
+        self.embedded = embedded
     }
 
     var body: some View {
-        NavigationStack {
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(AppModel.BoardColumn.allCases) { column in
-                        columnView(column)
+        if embedded {
+            columns
+        } else {
+            NavigationStack {
+                columns
+                    .navigationTitle("Board")
+                    #if os(iOS)
+                    .navigationBarTitleDisplayMode(.inline)
+                    #endif
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                        ToolbarItem(placement: .primaryAction) {
+                            Picker("Project", selection: $projectId) {
+                                Text("All projects").tag(String?.none)
+                                ForEach(model.liveProjects) { Text($0.label).tag(String?.some($0.id)) }
+                            }
+                            .pickerStyle(.menu)
+                        }
                     }
-                }
-                .scrollTargetLayout()
-                .padding(16)
             }
-            // On a phone, a swipe lands on the next column instead of halfway.
-            .scrollTargetBehavior(.viewAligned)
-            .background(Color.pageBackground)
-            .navigationTitle("Board")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
-                ToolbarItem(placement: .primaryAction) {
-                    Picker("Project", selection: $projectId) {
-                        Text("All projects").tag(String?.none)
-                        ForEach(model.liveProjects) { Text($0.label).tag(String?.some($0.id)) }
-                    }
-                    .pickerStyle(.menu)
+        }
+    }
+
+    private var columns: some View {
+        ScrollView(.horizontal) {
+            HStack(alignment: .top, spacing: 14) {
+                ForEach(AppModel.BoardColumn.allCases) { column in
+                    columnView(column)
                 }
             }
-            .sheet(item: $openTask) { TaskDetailView(task: $0) }
-            .alert("Waiting on who?", isPresented: Binding(get: { askWho != nil }, set: { if !$0 { askWho = nil } })) {
-                TextField("Name", text: $who)
-                Button("Cancel", role: .cancel) { askWho = nil }
-                Button("Move") {
-                    if let task = askWho { Task { await model.move(task, to: .waiting, waitingOn: who) } }
-                    askWho = nil
-                }
-            } message: {
-                Text("It comes back to To do on its follow-up date.")
+            .scrollTargetLayout()
+            .padding(16)
+        }
+        // On a phone, a swipe lands on the next column instead of halfway.
+        .scrollTargetBehavior(.viewAligned)
+        .background(Color.pageBackground)
+        .sheet(item: $openTask) { TaskDetailView(task: $0) }
+        .alert("Waiting on who?", isPresented: Binding(get: { askWho != nil }, set: { if !$0 { askWho = nil } })) {
+            TextField("Name", text: $who)
+            Button("Cancel", role: .cancel) { askWho = nil }
+            Button("Move") {
+                if let task = askWho { Task { await model.move(task, to: .waiting, waitingOn: who) } }
+                askWho = nil
             }
+        } message: {
+            Text("It comes back to To do on its follow-up date.")
         }
     }
 

@@ -1,46 +1,73 @@
 import PlannerKit
 import SwiftUI
 
-/// Every project at a glance: what's next, what's slipping, what's waiting. Tap one for its page.
+/// Every project as a solid colour tile, so each is easy to pick out at a glance. Tap one for
+/// its page.
 struct ProjectsHomeView: View {
     @Environment(AppModel.self) private var model
     @State private var adding = false
+    @State private var query = ""
+    @AppStorage("projects.sort") private var sort = ProjectSort.attention
+
+    private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
+
+    private var items: [(project: Project, summary: AppModel.ProjectSummary)] {
+        let all = model.projectsByAttention.filter { query.isEmpty || $0.project.name.localizedCaseInsensitiveContains(query) }
+        switch sort {
+        case .attention: return all
+        case .name: return all.sorted { $0.project.name.localizedCaseInsensitiveCompare($1.project.name) == .orderedAscending }
+        case .recent: return all.sorted { lastActivity($0.project) > lastActivity($1.project) }
+        }
+    }
+
+    private func lastActivity(_ p: Project) -> Date {
+        (model.state?.tasks ?? []).filter { $0.projectId == p.id }.map { $0.completedAt ?? $0.createdAt }.max() ?? .distantPast
+    }
 
     var body: some View {
         ScrollView {
-            LazyVStack(spacing: 12) {
-                if model.liveProjects.isEmpty {
-                    empty
-                } else {
-                    ForEach(model.projectsByAttention, id: \.project.id) { item in
+            if model.liveProjects.isEmpty {
+                empty.padding(16)
+            } else {
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(items, id: \.project.id) { item in
                         NavigationLink(value: item.project.id) {
-                            ProjectCard(project: item.project, summary: item.summary)
+                            ProjectTile(project: item.project, summary: item.summary)
                         }
                         .buttonStyle(.pressable)
                     }
                     let unfiled = model.summary(for: nil)
-                    if unfiled.open + unfiled.waiting.count > 0 {
+                    if query.isEmpty && unfiled.open + unfiled.waiting.count > 0 {
                         NavigationLink(value: ProjectsHomeView.unfiledID) {
-                            ProjectCard(project: nil, summary: unfiled)
+                            ProjectTile(project: nil, summary: unfiled)
                         }
                         .buttonStyle(.pressable)
                     }
+                    Button { adding = true } label: { newTile }
+                        .buttonStyle(.pressable)
                 }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 120) // room above the floating buttons
+                .animation(.planner, value: items.map(\.project.id))
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 8)
-            .padding(.bottom, 96) // room above the floating + button
         }
         .background(Color.pageBackground)
         .navigationTitle("Projects")
+        .modifier(SearchWhenMany(count: model.liveProjects.count, query: $query))
         .navigationDestination(for: String.self) { id in
             ProjectDetailView(projectId: id == Self.unfiledID ? nil : id)
         }
         .refreshable { await model.sync() }
         .toolbar {
-            ToolbarItem {
-                Button { adding = true } label: { Label("New Project", systemImage: "folder.badge.plus") }
-                    .help("Add a project")
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Picker("Sort", selection: $sort) {
+                        ForEach(ProjectSort.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    }
+                } label: {
+                    Label("Sort", systemImage: "arrow.up.arrow.down")
+                }
             }
             AddToolbar()
         }
@@ -49,16 +76,113 @@ struct ProjectsHomeView: View {
 
     static let unfiledID = "__unfiled"
 
+    private var newTile: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "plus").font(.title2.weight(.semibold))
+            Text("New project").font(.subheadline.weight(.semibold))
+        }
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, minHeight: 150)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).strokeBorder(Color.secondary.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 5])))
+    }
+
     private var empty: some View {
         Card {
             VStack(alignment: .leading, spacing: 10) {
-                Label("No projects yet", systemImage: "folder").font(.headline)
+                Label("No projects yet", systemImage: "square.grid.2x2").font(.headline)
                 Text("A project groups tasks so you can see how each one is going. Type #tag when you add a task to file it.")
                     .foregroundStyle(.secondary)
                 Button { adding = true } label: { Label("New Project", systemImage: "plus") }
                     .buttonStyle(.borderedProminent)
             }
         }
+    }
+}
+
+enum ProjectSort: String, CaseIterable, Identifiable {
+    case attention, name, recent
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .attention: "Needs attention"
+        case .name: "A–Z"
+        case .recent: "Recently active"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .attention: "exclamationmark.circle"
+        case .name: "textformat"
+        case .recent: "clock"
+        }
+    }
+}
+
+/// A search field once there are enough projects to need one.
+private struct SearchWhenMany: ViewModifier {
+    let count: Int
+    @Binding var query: String
+    func body(content: Content) -> some View {
+        if count > 6 { content.searchable(text: $query, prompt: "Find a project") } else { content }
+    }
+}
+
+/// A project as a solid tile of its colour: big emoji, bold name, open count and what's next.
+private struct ProjectTile: View {
+    let project: Project?
+    let summary: AppModel.ProjectSummary
+
+    private var base: Color { project?.color.color ?? .gray }
+    private var ink: Color { project?.color.inkOnFill ?? .white }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top) {
+                Text(project?.emoji.isEmpty == false ? project!.emoji : project == nil ? "📥" : "📁")
+                    .font(.system(size: 26))
+                    .frame(width: 44, height: 44)
+                    .background(Color.white.opacity(0.28), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Spacer()
+                if !summary.overdue.isEmpty {
+                    badge("\(summary.overdue.count)", .red)
+                } else if !summary.unscheduled.isEmpty {
+                    badge("\(summary.unscheduled.count)", .orange)
+                }
+            }
+            Spacer(minLength: 0)
+            Text(project?.name ?? "No project")
+                .font(.headline.weight(.bold))
+                .lineLimit(2)
+                .minimumScaleFactor(0.85)
+            Text(summary.open == 0 ? "All clear" : "\(summary.open) open" + (summary.waiting.isEmpty ? "" : " · \(summary.waiting.count) waiting"))
+                .font(.caption.weight(.semibold))
+                .opacity(0.85)
+            if let next = summary.nextUp {
+                Text(next.title).font(.caption).lineLimit(1).opacity(0.75)
+            }
+        }
+        .foregroundStyle(ink)
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(
+            LinearGradient(colors: [base, base.opacity(0.78)], startPoint: .topLeading, endPoint: .bottomTrailing),
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .shadow(color: base.opacity(0.35), radius: 10, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 22))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(project?.name ?? "No project"), \(summary.open) open\(summary.overdue.isEmpty ? "" : ", \(summary.overdue.count) overdue")")
+    }
+
+    private func badge(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.caption.weight(.bold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 8)
+            .frame(minWidth: 24, minHeight: 24)
+            .background(color, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.8), lineWidth: 1.5))
     }
 }
 
@@ -201,16 +325,7 @@ struct ProjectDetailView: View {
                     Text(s.open == 0 ? "Nothing open." : "Everything open has time booked.")
                         .foregroundStyle(.secondary)
                 }
-                ForEach(s.unscheduled) { task in
-                    row(task)
-                        .swipeActions(edge: .leading) {
-                            Button { Task { await model.scheduleNextFree(task) } } label: { Label("Next free", systemImage: "calendar.badge.plus") }
-                                .tint(.accentColor)
-                        }
-                        .contextMenu {
-                            Button { Task { await model.scheduleNextFree(task) } } label: { Label("Book Next Free Slot", systemImage: "calendar.badge.plus") }
-                        }
-                }
+                ForEach(s.unscheduled) { row($0) }
             } header: {
                 HStack {
                     Text("To schedule")
@@ -224,7 +339,7 @@ struct ProjectDetailView: View {
                 }
             } footer: {
                 if !s.unscheduled.isEmpty {
-                    Text("Swipe right on a task to book its next free slot\(project.map { $0.windows.isEmpty ? "" : " in this project's hours" } ?? "").")
+                    Text("Tap Book to take the next free slot\(project.map { $0.windows.isEmpty ? "" : " in this project's hours" } ?? "").")
                 }
             }
 
@@ -256,8 +371,12 @@ struct ProjectDetailView: View {
         }
     }
 
-    private func row(_ task: PlannerTask) -> some View {
-        TaskRow(task: task, nextBlock: model.nextBlock(for: task), showProject: false, onOpen: { openTask = task })
+    @ViewBuilder private func row(_ task: PlannerTask) -> some View {
+        if task.isDone {
+            TaskRow(task: task, nextBlock: nil, showProject: false, onOpen: { openTask = task })
+        } else {
+            PlanRow(task: task, showProject: false, onOpen: { openTask = task })
+        }
     }
 
     private func rows(_ tasks: [PlannerTask]) -> some View {

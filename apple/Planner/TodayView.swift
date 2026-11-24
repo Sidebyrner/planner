@@ -38,11 +38,6 @@ struct TodayView: View {
                 .help("Propose blocks for open tasks in today's free time")
             }
             AddToolbar(showFlows: true)
-            #if os(iOS)
-            ToolbarItem(placement: .topBarLeading) {
-                Button { router.open(.settings) } label: { Label("Settings", systemImage: "gear") }
-            }
-            #endif
         }
         .sheet(item: $openTask) { TaskDetailView(task: $0) }
         .sheet(item: $openEvent) { EventDetailView(event: $0) }
@@ -199,7 +194,7 @@ private struct RoutineStrip: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button { router.go(.routines) } label: {
+                Button { router.open(.routines) } label: {
                     HStack(spacing: 3) {
                         Text("All routines")
                         Image(systemName: "chevron.right").font(.caption2.weight(.bold))

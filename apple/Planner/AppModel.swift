@@ -78,6 +78,8 @@ final class AppModel {
     private(set) var calendarAccess = false
     private(set) var calendars: [CalendarInfo] = []
     private(set) var plannerCalendarID: String?
+    /// Gmail, loaded when the Inbox is open.
+    let inbox = InboxStore()
 
     // MARK: Plumbing
 

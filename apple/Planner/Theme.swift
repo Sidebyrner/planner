@@ -17,6 +17,14 @@ extension ProjectColor {
     }
 
     var name: String { rawValue.capitalized }
+
+    /// Text that reads on a solid tile of this colour: dark on the light ones.
+    var inkOnFill: Color {
+        switch self {
+        case .amber, .green, .teal, .orange: Color.black.opacity(0.82)
+        default: .white
+        }
+    }
 }
 
 extension Optional where Wrapped == Project {
@@ -39,6 +47,21 @@ extension Color {
     static let ink = Color(light: Color(red: 0.11, green: 0.11, blue: 0.13), dark: Color(red: 0.95, green: 0.95, blue: 0.97))
     /// Glyphs on ink.
     static let onInk = Color(light: .white, dark: Color(red: 0.08, green: 0.08, blue: 0.1))
+}
+
+extension View {
+    /// Liquid Glass on iOS 26 and macOS 26, a frosted material with a hairline and shadow before.
+    @ViewBuilder
+    func glassSurface<S: InsettableShape>(_ shape: S, interactive: Bool = false) -> some View {
+        if #available(iOS 26.0, macOS 26.0, *) {
+            self.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+                .shadow(color: .black.opacity(0.12), radius: 14, y: 5)
+        } else {
+            self.background(.regularMaterial, in: shape)
+                .overlay(shape.strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.75))
+                .shadow(color: .black.opacity(0.14), radius: 14, y: 5)
+        }
+    }
 }
 
 extension Animation {

@@ -452,16 +452,26 @@ public struct GoogleStatus: Codable, Hashable, Sendable {
     public var error: String?
 }
 
+public struct GmailStatus: Codable, Hashable, Sendable {
+    public var configured: Bool
+    public var connected: Bool
+    public var lastCheckAt: Date?
+    public var error: String?
+    /// Connected with permission to send, so replies can go from the app.
+    public var canReply: Bool? = nil
+}
+
 public struct AppState: Codable, Hashable, Sendable {
     public var tasks: [PlannerTask]
     public var events: [CalEvent]
     public var settings: Settings
     public var google: GoogleStatus
     public var projects: [Project] = []
+    public var gmail: GmailStatus? = nil
 }
 
 extension AppState {
-    private enum CodingKeys: String, CodingKey { case tasks, events, settings, google, projects }
+    private enum CodingKeys: String, CodingKey { case tasks, events, settings, google, projects, gmail }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -470,7 +480,50 @@ extension AppState {
         settings = try c.decode(Settings.self, forKey: .settings)
         google = try c.decode(GoogleStatus.self, forKey: .google)
         projects = try c.decodeIfPresent([Project].self, forKey: .projects) ?? []
+        gmail = try? c.decodeIfPresent(GmailStatus.self, forKey: .gmail)
     }
+}
+
+// MARK: - Inbox (Gmail)
+
+public struct InboxThread: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var subject: String
+    public var snippet: String
+    public var lastAt: Date
+    public var unread: Bool
+    public var messageCount: Int
+}
+
+/// Everyone who's emailed you lately, with their threads, like a Messages list.
+public struct InboxPerson: Codable, Hashable, Sendable, Identifiable {
+    public var email: String
+    public var name: String
+    public var lastAt: Date
+    public var unread: Int
+    public var threads: [InboxThread]
+    /// Open tasks with this person as their contact.
+    public var taskIds: [String]
+    public var id: String { email.lowercased() }
+}
+
+public struct InboxAddress: Codable, Hashable, Sendable {
+    public var name: String
+    public var email: String
+}
+
+public struct InboxMessage: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var from: InboxAddress
+    public var fromMe: Bool
+    public var at: Date
+    public var text: String
+}
+
+public struct InboxConversation: Codable, Hashable, Sendable, Identifiable {
+    public var id: String
+    public var subject: String
+    public var messages: [InboxMessage]
 }
 
 // MARK: - Request bodies
